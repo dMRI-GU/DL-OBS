@@ -2,7 +2,7 @@ from tqdm import tqdm
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
 from utils import post_processing, myToyDataset
-from unet_model import UNet
+from model.unet_model import UNet
 from pathlib import Path
 import logging
 import wandb
