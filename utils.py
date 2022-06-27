@@ -1,6 +1,5 @@
 from cmath import sqrt
 from torch.utils.data import Dataset
-from PIL import Image
 import torch
 
 class post_processing():
@@ -10,8 +9,7 @@ class post_processing():
     def __init__(self, net, device):
         '''
         net - trainde neural network
-        out_map - [batch_size, out_channels, H, W] the output parameter maps
-        b - the b values to compute the expectation of
+        device - used the device for training
         '''
         super().__init__()
         self.net = net
@@ -19,6 +17,7 @@ class post_processing():
     
     def evaluate(self, val_loader, b):
         '''
+        Get the validation loss during training
         '''
         loss = torch.nn.MSELoss()
         self.net.eval()
@@ -37,6 +36,7 @@ class post_processing():
 
 
     def rice_exp(self, s_0, d_1, d_2, f, sigma_g, b):
+        'Get the expectation of the signal using denoised signal and std.'
         v = self.biexp(s_0, d_1, d_2, f, b)
 
         t = v /sigma_g
@@ -47,6 +47,7 @@ class post_processing():
         return res.to(torch.float32)
     
     def parameter_maps(self, out_maps):
+        'Get the parameter maps from the output'
         s_0, d_1 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
         d_2, f, sigma_g = out_maps[:, 2:3, :, :], out_maps[:, 3:4, :, :], out_maps[:, 4:5, :, :]
 
@@ -54,7 +55,7 @@ class post_processing():
 
     def biexp(self, s_0, d_1, d_2, f, b):
         '''
-        Reconstuct the denoised signal using the output parameter map
+        Reconstuct the denoised signal using the output parameter maps
         '''
         num_slices, _, h, w = s_0.shape
 
@@ -74,13 +75,10 @@ class post_processing():
         """
         return cons[0]+torch.sigmoid(params)*(cons[1]-cons[0])
 
-def get_toy_datasets(num_images, in_channels):
-    '''
-    simulated data sets for testing
-    '''
-    return torch.randn((num_images, in_channels, 32, 32), device='cuda')
-
 class myToyDataset(Dataset):
+    '''
+    Simulate a toy dataset to see if the training code can work. Data from random normal distribution
+    '''
     def __init__(self, num_images, in_channels):
         super().__init__()
         self.data = torch.randn((num_images, in_channels, 128, 128))
