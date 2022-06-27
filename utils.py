@@ -1,69 +1,97 @@
 from cmath import sqrt
+from torch.utils.data import Dataset
+from PIL import Image
 import torch
-import os
 
-def rice_exp(output_map, b):
-    v = biexp(output_map, b)
-    sigma_g = output_map[:, 4, :, :, :]
-
-    t= v /sigma_g
-    res= sigma_g*(sqrt(torch.pi/8)*
-                    ((2+t**2)*torch.special.i0e(t**2/4)+
-                     t**2*torch.special.i1e(t**2/4)))
-
-    return res
-
-def biexp(output_map, b):
+class post_processing():
     '''
-    Reconstuct the denoised signal using the output parameter map
+    This class include the post processing function to evaluate the trained model
     '''
-    s_0, d_1, d_2, f = output_map[:, 0, :, :, :], output_map[:, 1, :, :, :], output_map[:, 2, :, :, :], output_map[:, 3, :, :, :]
+    def __init__(self, net, device):
+        '''
+        net - trainde neural network
+        out_map - [batch_size, out_channels, H, W] the output parameter maps
+        b - the b values to compute the expectation of
+        '''
+        super().__init__()
+        self.net = net
+        self.device = device
+    
+    def evaluate(self, val_loader, b):
+        '''
+        '''
+        loss = torch.nn.MSELoss()
+        self.net.eval()
+        val_losses = 0
 
-    num_slices, _,  h, w = s_0.shape
+        for batch in val_loader:
+            images = batch['image']
+            images = images.to(self.device)
 
-    'vb (num of slices, b values, h, w)'
-    vb = torch.ones((num_slices, len(b), h, w), device=try_gpu())
+            out = self.net(images)
+            s_0, d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out)
+            M = self.rice_exp(s_0, d_1, d_2, f, sigma_g, b)
+            val_losses += loss(M, images).item()
+        
+        return val_losses
 
-    for i in range(len(b)):
-        vb[:, i, :, :] = b[i]
 
-    return s_0 *(f * torch.exp(- vb * d_1  * 1e-3) + (1 - f) * torch.exp(- vb * d_2 * 1e-3))
+    def rice_exp(self, s_0, d_1, d_2, f, sigma_g, b):
+        v = self.biexp(s_0, d_1, d_2, f, b)
 
-def sigmoid_cons(params,cons):
-    """
-    params: parameter array
-    cons: constraints cons[0]: lower bound cons[1]: upper bound
-    """
-    return cons[0]+torch.sigmoid(params)*(cons[1]-cons[0])
+        t = v /sigma_g
+        res= sigma_g*(sqrt(torch.pi/8)*
+                        ((2+t**2)*torch.special.i0e(t**2/4)+
+                        t**2*torch.special.i1e(t**2/4)))
 
-def init_weights(m):
-    'Xaiver initialization'
-    if type(m) == torch.nn.Linear:
-        torch.nn.init.xavier_uniform(m.weight)
+        return res.to(torch.float32)
+    
+    def parameter_maps(self, out_maps):
+        s_0, d_1 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
+        d_2, f, sigma_g = out_maps[:, 2:3, :, :], out_maps[:, 3:4, :, :], out_maps[:, 4:5, :, :]
+
+        return s_0, d_1, d_2, f, sigma_g
+
+    def biexp(self, s_0, d_1, d_2, f, b):
+        '''
+        Reconstuct the denoised signal using the output parameter map
+        '''
+        num_slices, _, h, w = s_0.shape
+
+        'vb (num of slices, b values, h, w)'
+        vb = torch.zeros((num_slices, len(b), h, w))
+        vb = vb.to(self.device)
+
+        for i in range(len(b)):
+            vb[:, i, :, :] = b[i]
+
+        return s_0 *(f * torch.exp(- vb * d_1  * 1e-3) + (1 - f) * torch.exp(- vb * d_2 * 1e-3))
+
+    def sigmoid_cons(self, params,cons):
+        """
+        params: parameter array
+        cons: constraints cons[0]: lower bound cons[1]: upper bound
+        """
+        return cons[0]+torch.sigmoid(params)*(cons[1]-cons[0])
 
 def get_toy_datasets(num_images, in_channels):
     '''
     simulated data sets for testing
     '''
-    return torch.randn(num_images, in_channels, 1, 128, 128)
+    return torch.randn((num_images, in_channels, 32, 32), device='cuda')
 
-def get_lr(optimizer):
-    for param_group in optimizer.param_groups:
-        return param_group['lr']
+class myToyDataset(Dataset):
+    def __init__(self, num_images, in_channels):
+        super().__init__()
+        self.data = torch.randn((num_images, in_channels, 128, 128))
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+        image = self.data[idx]
+        sample = {'image': image}
 
-def try_gpu(i=0):
-    '''
-    If GPU exists, return the ith GPU, else return cpu
-    '''
-    if torch.cuda.device_count() >= i + 1:
-        return torch.device(f'cuda:{i}')
-    return torch.device('cpu')
-
-
-def number_of_features_per_level(init_channel_number, num_levels):
-    '''
-    Get the number of kernels per level.
-    e.g. num_levels = 4, init_channel_number = 64.
-        return [64, 128, 256, 512]
-    '''
-    return [init_channel_number * 2 ** k for k in range(num_levels)]
+        return sample
