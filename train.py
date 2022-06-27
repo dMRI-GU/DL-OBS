@@ -1,90 +1,171 @@
-from model import UNet2D
 from tqdm import tqdm
+from torch import nn, optim
+from torch.utils.data import DataLoader, random_split
+from utils import post_processing, myToyDataset
+from unet_model import UNet
+from pathlib import Path
+import logging
+import wandb
+import argparse
 import torch
-from torch import nn
-from utils import get_toy_datasets, rice_exp, get_lr, try_gpu, init_weights
-import warnings
-import numpy as np
 
-def fit_one_epoch(net, b, batch_size, train_loader, val_loader, optimizer, device, epo):
+dir_checkpoint = Path('./checkpoints/')
 
-    train_losses = 0 
-    val_losses = 0
-    net.train()
+def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, 
+                val_percent: float=0.1, save_checkpoint: bool=True, amp: bool = False):
+    
+    # split into training and validation set
+    n_val = int(len(dataset) * val_percent)
+    n_train = len(dataset) - n_val
+    train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
-    with tqdm(total=batch_size, desc='Epoch :{}'.format(epo)) as pbar:
-        for iteration, batch in enumerate(train_loader):
-            batch_images = batch
-            with torch.no_grad():
-                batch_images =batch_images.type(torch.FloatTensor).to(device)
+    loader_args = dict(batch_size=batch_size, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_set, shuffle=True, **loader_args)
+    val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
-            optimizer.zero_grad()
+    experiment = wandb.init(project='UNet-Denoise', resume='allow', anonymous='must')
+    experiment.config.update(dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
+                                  val_percent=val_percent, save_checkpoint=save_checkpoint, amp=amp))
 
-            out_maps = net(batch_images)
-            M = rice_exp(out_maps, b)
-            M = M.to(torch.float32)
+    logging.info(f'''Starting training:
+        Epochs:          {epochs}
+        Batch size:      {batch_size}
+        Learning rate:   {learning_rate}
+        Training size:   {n_train}
+        Validation size: {n_val}
+        Checkpoints:     {save_checkpoint}
+        Device:          {device.type}
+        Mixed Precision: {amp}
+    ''')
 
-            mseloss = nn.MSELoss()
-            loss = mseloss(M, batch_images.view(M.shape).requires_grad_())
+    optimizer = optim.Adam(net.parameters(), lr=learning_rate)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
+    grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
+    criterion = nn.MSELoss()
+    global_step = 0
 
-            loss.backward()
-            optimizer.step()
+    post_process= post_processing(net, device)
 
-            train_losses += loss.item()
+    for epoch in range(1, epochs+1):
+        net.train()
+        epoch_loss = 0
+        with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
+            for batch in train_loader:
+                images = batch['image']
 
-            # pbar.set_postfix(**{'total_loss': train_losses / (iteration + 1), 
-            #                     'lr'        : get_lr(optimizer)})
-            pbar.update(1)
+                assert images.shape[1] == net.n_channels, \
+                    f'Network has been defined with {net.n_channels} input channels, ' \
+                    f'but loaded images have {images.shape[1]} channels. Please check that ' \
+                    'the images are loaded correctly.'
 
-    net.eval()
-    print('Start Validation')
-    for batch in val_loader:
-        val_images = batch
-        with torch.no_grad():
-            val_images = val_images.type(torch.FloatTensor).to(device)
-            optimizer.zero_grad()
-            out_maps = net(val_images)
+                images = images.to(device=device, dtype=torch.float32)
 
-            M = rice_exp(out_maps, b)
-            M = M.to(torch.float32)
+                with torch.cuda.amp.autocast(enabled=amp):
+                    out_maps = net(images)
 
-            mseloss = nn.MSELoss()
-            val_loss = mseloss(M, val_images.view(M.shape).requires_grad_())
+                    s_0, d_1, d_2, f, sigma_g = post_process.parameter_maps(out_maps)
 
-            val_losses += val_loss.item()
-    print('The total validation loss is {}'.format(val_losses))
-    print('Stop Validation')
+                    M = post_process.rice_exp(s_0, d_1, d_2, f, sigma_g, b)
+                    loss = criterion(M, images)
 
-    return val_losses
+                optimizer.zero_grad(set_to_none=True)
+                grad_scaler.scale(loss).backward()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
+
+                pbar.update(images.shape[0])
+                global_step += 1
+                epoch_loss += loss.item()
+                experiment.log({
+                    'train loss': loss.item(),
+                    'step': global_step,
+                    'epoch': epoch
+                })
+                pbar.set_postfix(**{'loss (batch)': loss.item()})
+
+                # Evaluation round
+                division_step = (n_train // (10 * batch_size))
+                if division_step > 0:
+                    if global_step % division_step == 0:
+                        histograms = {}
+                        for tag, value in net.named_parameters():
+                            tag = tag.replace('/', '.')
+                            histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
+                            histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
+                        
+                        val_loss = post_process.evaluate(val_loader, b)
+                        scheduler.step(val_loss)
+
+                        logging.info('Validation Loss: {}'.format(val_loss))
+                        experiment.log({
+                            'learning rate': optimizer.param_groups[0]['lr'],
+                            'validation Loss': val_loss,
+                            'images': wandb.Image(images[0].cpu()),
+                            'Noise': wandb.Image(sigma_g[0].cpu()),
+                            'step': global_step,
+                            'epoch': epoch,
+                            **histograms
+                        })
+
+        if save_checkpoint:
+            Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
+            torch.save(net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
+            logging.info(f'Checkpoint {epoch} saved!')
+
+def get_args():
+    parser = argparse.ArgumentParser(description='Train the UNet on images')
+    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
+                        help='Learning rate', dest='lr')
+    parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
+    parser.add_argument('--scale', '-s', type=float, default=0.5, help='Downscaling factor of the images')
+    parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
+                        help='Percent of the data that is used as validation (0-100)')
+    parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
+    parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
+    parser.add_argument('--classes', '-c', type=int, default=5, help='Number of classes')
+
+    return parser.parse_args()
 
 if __name__ == '__main__':
-    warnings.filterwarnings("ignore")
+    args = get_args()
 
-    num_epochs = 80
-    lr = 1e-5
-    batch_size = 2
-    in_channels = 3
-    output_channels = 5
-    b = torch.linspace(100, 2000, steps=in_channels)
-    device = try_gpu()
-    b.to(device)
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logging.info(f'Using device {device}')
 
-    model = UNet2D(in_channels=in_channels, out_channels=output_channels)
-    model.apply(init_weights)
-    model.to(device)
+    # Change here to adapt to your data
+    # n_channels=3 for RGB images
+    # n_classes is the number of probabilities you want to get per pixel
+    net = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
 
-    optimizer = torch.optim.Adam(model.parameters(),lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
+    logging.info(f'Network:\n'
+                 f'\t{net.n_channels} input channels\n'
+                 f'\t{net.n_classes} output channels (classes)\n'
+                 f'\t{"Bilinear" if net.bilinear else "Transposed conv"} upscaling')
 
-    data_set = get_toy_datasets(120, in_channels)  
-    for i in range(num_epochs):
-        train_set, val_set = torch.utils.data.random_split(data_set, lengths=[100, 20])  
-        print(len(val_set))
+    if args.load:
+        net.load_state_dict(torch.load(args.load, map_location=device))
+        logging.info(f'Model loaded from {args.load}')
 
-        train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True)
-        val_loader = torch.utils.data.DataLoader(val_set, batch_size=batch_size, shuffle=True)
-    
-        val_losses = fit_one_epoch(model, b, batch_size, train_loader, val_loader, optimizer, device, i)
-        scheduler.step(val_losses)
+    net.to(device=device)
+    b = torch.linspace(100, 2000, steps=net.n_channels, device=device)
 
+    data_set = myToyDataset(120, in_channels=3)  
+    try:
+        train_net(dataset=data_set,
+                  net=net,
+                  device=device,
+                  b = b,
+                  epochs=args.epochs,
+                  batch_size=args.batch_size,
+                  learning_rate=args.lr,
+                  val_percent=args.val / 100,
+                  amp=args.amp)
+    except KeyboardInterrupt:
+        torch.save(net.state_dict(), 'INTERRUPTED.pth')
+        logging.info('Saved interrupt')
+        raise
 
+'def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, val_percent: float=0.1, save_checkpoint: bool=True, amp: bool = False):'
