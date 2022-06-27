@@ -167,5 +167,3 @@ if __name__ == '__main__':
         torch.save(net.state_dict(), 'INTERRUPTED.pth')
         logging.info('Saved interrupt')
         raise
-
-'def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, val_percent: float=0.1, save_checkpoint: bool=True, amp: bool = False):'
