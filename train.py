@@ -137,6 +137,7 @@ if __name__ == '__main__':
 
     data_dir = 'save_npy'
     load = load_data(data_dir)
+    
     '[num_slices, num_diff_dir, H, W]'
     data = load.image_data(args.dir)
     data = np.swapaxes(data, 0, 1)

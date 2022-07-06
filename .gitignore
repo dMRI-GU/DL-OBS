@@ -1,3 +1,6 @@
 __pycache__/
 checkpoints/
 wandb/
+ana_mri.py
+dicom_read.py
+load_pat_data.py
