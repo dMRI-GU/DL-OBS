@@ -1,10 +1,11 @@
 from tqdm import tqdm
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
-from utils import post_processing, myToyDataset
+from utils import load_data, post_processing, patientDataset, init_weights
 from model.unet_model import UNet
 from pathlib import Path
 import logging
+import numpy as np
 import wandb
 import argparse
 import torch
@@ -23,9 +24,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
-    experiment = wandb.init(project='UNet-Denoise', resume='allow', anonymous='must')
+    '''experiment = wandb.init(project='UNet-Denoise', resume='allow', anonymous='must')
     experiment.config.update(dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-                                  val_percent=val_percent, save_checkpoint=save_checkpoint, amp=amp))
+                                  val_percent=val_percent, save_checkpoint=save_checkpoint, amp=amp))'''
 
     logging.info(f'''Starting training:
         Epochs:          {epochs}
@@ -76,27 +77,28 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
-                experiment.log({
+                '''experiment.log({
                     'train loss': loss.item(),
                     'step': global_step,
                     'epoch': epoch
-                })
+                })'''
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
                 # Evaluation round
                 division_step = (n_train // (10 * batch_size))
                 if division_step > 0:
                     if global_step % division_step == 0:
-                        histograms = {}
+                        '''histograms = {}
                         for tag, value in net.named_parameters():
                             tag = tag.replace('/', '.')
                             histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
-                            histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
+                            histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())'''
                         
                         val_loss = post_process.evaluate(val_loader, b)
                         scheduler.step(val_loss)
 
                         logging.info('Validation Loss: {}'.format(val_loss))
+                        '''print(images[0].shape)
                         experiment.log({
                             'learning rate': optimizer.param_groups[0]['lr'],
                             'validation Loss': val_loss,
@@ -105,7 +107,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                             'step': global_step,
                             'epoch': epoch,
                             **histograms
-                        })
+                        })'''
 
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
@@ -114,8 +116,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
+    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=80, help='Number of epochs')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=5, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
@@ -125,20 +127,27 @@ def get_args():
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--classes', '-c', type=int, default=5, help='Number of classes')
+    parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
+                        dest='dir')
 
     return parser.parse_args()
 
 if __name__ == '__main__':
     args = get_args()
 
+    data_dir = 'save_npy'
+    load = load_data(data_dir)
+    '[num_slices, num_diff_dir, H, W]'
+    data = load.image_data(args.dir)
+    data = np.swapaxes(data, 0, 1)
+    data_set = patientDataset(data)
+    
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
     # Change here to adapt to your data
-    # n_channels=3 for RGB images
-    # n_classes is the number of probabilities you want to get per pixel
-    net = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    net = UNet(n_channels=data.shape[1], n_classes=args.classes, bilinear=args.bilinear)
 
     logging.info(f'Network:\n'
                  f'\t{net.n_channels} input channels\n'
@@ -146,13 +155,13 @@ if __name__ == '__main__':
                  f'\t{"Bilinear" if net.bilinear else "Transposed conv"} upscaling')
 
     if args.load:
-        net.load_state_dict(torch.load(args.load, map_location=device))
         logging.info(f'Model loaded from {args.load}')
+        net.load_state_dict(torch.load(args.load, map_location=device))
 
     net.to(device=device)
+    net.apply(init_weights)
     b = torch.linspace(100, 2000, steps=net.n_channels, device=device)
 
-    data_set = myToyDataset(120, in_channels=3)  
     try:
         train_net(dataset=data_set,
                   net=net,
