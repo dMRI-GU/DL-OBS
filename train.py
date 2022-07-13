@@ -24,9 +24,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
-    '''experiment = wandb.init(project='UNet-Denoise', resume='allow', anonymous='must')
+    experiment = wandb.init(project='UNet-Denoise', resume='allow', anonymous='must')
     experiment.config.update(dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-                                  val_percent=val_percent, save_checkpoint=save_checkpoint, amp=amp))'''
+                                  val_percent=val_percent, save_checkpoint=save_checkpoint, amp=amp))
 
     logging.info(f'''Starting training:
         Epochs:          {epochs}
@@ -45,7 +45,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     criterion = nn.MSELoss()
     global_step = 0
 
-    post_process= post_processing(net, device)
+    post_process= post_processing()
 
     for epoch in range(1, epochs+1):
         net.train()
@@ -66,7 +66,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
                     s_0, d_1, d_2, f, sigma_g = post_process.parameter_maps(out_maps)
 
-                    M = post_process.rice_exp(s_0, d_1, d_2, f, sigma_g, b)
+                    v = post_process.biexp(s_0, d_1, d_2, f, b)
+                    M = post_process.rice_exp(v, sigma_g)
                     loss = criterion(M, images)
 
                 optimizer.zero_grad(set_to_none=True)
@@ -77,41 +78,43 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
-                '''experiment.log({
+                experiment.log({
                     'train loss': loss.item(),
                     'step': global_step,
                     'epoch': epoch
-                })'''
-                pbar.set_postfix(**{'loss (batch)': loss.item()})
+                })
 
                 # Evaluation round
                 division_step = (n_train // (10 * batch_size))
                 if division_step > 0:
                     if global_step % division_step == 0:
-                        '''histograms = {}
+                        histograms = {}
                         for tag, value in net.named_parameters():
                             tag = tag.replace('/', '.')
                             histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
-                            histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())'''
+                            histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
                         
-                        val_loss = post_process.evaluate(val_loader, b)
+                        val_loss, params = post_process.evaluate(val_loader, b, net)
                         scheduler.step(val_loss)
 
                         logging.info('Validation Loss: {}'.format(val_loss))
-                        '''print(images[0].shape)
+                        
                         experiment.log({
                             'learning rate': optimizer.param_groups[0]['lr'],
                             'validation Loss': val_loss,
-                            'images': wandb.Image(images[0].cpu()),
-                            'Noise': wandb.Image(sigma_g[0].cpu()),
+                            's0': wandb.Image(params['s_0'][0].cpu()),
+                            'd1': wandb.Image(params['d_1'][0].cpu()),
+                            'd2': wandb.Image(params['d_2'][0].cpu()),
+                            'f': wandb.Image(params['f'][0].cpu()),
+                            'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
                             'step': global_step,
                             'epoch': epoch,
                             **histograms
-                        })'''
+                        })
 
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
-            torch.save(net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
+            torch.save( net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
 
 def get_args():
@@ -137,11 +140,14 @@ if __name__ == '__main__':
 
     data_dir = 'save_npy'
     load = load_data(data_dir)
-    
-    '[num_slices, num_diff_dir, H, W]'
+
+    '[num_slices(batch_size), num_diff_dir, H, W]'
     data = load.image_data(args.dir)
-    data = np.swapaxes(data, 0, 1)
+
+    'swap the dimension of'
+    data = data.transpose(1, 0, 2, 3)
     data_set = patientDataset(data)
+    logging.info(f'TRAING DATA SIZE: {data.shape}')
     
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -161,7 +167,9 @@ if __name__ == '__main__':
 
     net.to(device=device)
     net.apply(init_weights)
-    b = torch.linspace(100, 2000, steps=net.n_channels, device=device)
+    b = torch.linspace(0, 3000, steps=net.n_channels + 1, device=device)
+    'discard the value 0'
+    b = b[1:]
 
     try:
         train_net(dataset=data_set,
@@ -177,3 +185,4 @@ if __name__ == '__main__':
         torch.save(net.state_dict(), 'INTERRUPTED.pth')
         logging.info('Saved interrupt')
         raise
+    

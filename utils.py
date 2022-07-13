@@ -2,6 +2,7 @@ from cmath import sqrt
 from torch.utils.data import Dataset
 import torch
 import os
+from scipy import special
 import numpy as np
 import torch.nn as nn
 
@@ -10,26 +11,25 @@ def init_weights(m):
         torch.nn.init.xavier_uniform(m.weight)
 
 class load_data():
-    '''
+    """
     This class load the data from the pointed directory
-    '''
+    """
 
     def __init__(self, data_dir):
-        '''
+        """
         data_dir: directory storing the data 'save_npy'
-        '''
+        """
         super().__init__()
         self.data_dir = data_dir
         self.names = self.pat_names()
         self.pat_data = self.load()
     
     def load(self):
-        '''
+        """
         Load the data from the data_dir
-        '''
+        """
         pat_names = os.listdir(self.data_dir)
         pat_data = {}
-        names = self.names
 
         for i, pat_d in enumerate(pat_names):
 
@@ -37,14 +37,13 @@ class load_data():
             name = pat_d[:-4]
             data_path = os.path.join(self.data_dir, pat_d)
             data = np.load(data_path, allow_pickle=True)[()]
-            pat_data[names[i]] = data
+            pat_data[name] = data
 
         return pat_data
     
     def pat_names(self):
-        '''
-        Get the names of the patient data
-        '''
+        """
+        """
         pat_names = os.listdir(self.data_dir)
         names = []
 
@@ -54,10 +53,12 @@ class load_data():
 
         return names
 
-    def image_data(self, dir = 'S'):
-        '''get the image data of the corresponding diffusion direction 
+    def image_data(self, dir = 'M'):
+        """
+        get the image data of the corresponding diffusion direction 
         (slices as batch size) 
-        diffusion direction: I, S, M, P '''
+        diffusion direction: I, S, M, P 
+        """
         data_list = []        
 
         for pat_name in self.names:
@@ -80,41 +81,40 @@ class load_data():
         return np.concatenate(tuple(data_list), axis=1)
 
 class post_processing():
-    '''
+    """
     This class include the post processing function to evaluate the trained model
-    '''
-    def __init__(self, net, device):
-        '''
-        net - trainde neural network
-        device - used the device for training
-        '''
+    """
+    def __init__(self):
+
         super().__init__()
-        self.net = net
-        self.device = device
     
-    def evaluate(self, val_loader, b):
-        '''
-        Get the validation loss during training
-        '''
+    def evaluate(self, val_loader, b, net):
+        """
+        evlaute the performance of network 
+        """
         loss = torch.nn.MSELoss()
-        self.net.eval()
+        net.eval()
         val_losses = 0
+
+        params_val = dict()
 
         for batch in val_loader:
             images = batch['image']
-            images = images.to(self.device)
-            images = images.to(torch.float32)
+            images = images.to(self.device, type=torch.float32)
 
-            out = self.net(images)
+            out = net(images)
             s_0, d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out)
-            M = self.rice_exp(s_0, d_1, d_2, f, sigma_g, b)
+            params_val = {'s_0':s_0, 'd_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma_g}
+            
+            v = self.biexp(s_0, d_1, d_2, f, b)
+            M = self.rice_exp(v, sigma_g)
             val_losses += loss(M, images).item()
         
-        return val_losses
+        return val_losses, params_val
 
-    def rice_exp(self, s_0, d_1, d_2, f, sigma_g, b):
-        'Get the expectation of the signal using denoised signal and std.'
-        v = self.biexp(s_0, d_1, d_2, f, b)
+    def rice_exp(self, v, sigma_g):
+        """
+        """
 
         t = v / sigma_g
         res= sigma_g*(sqrt(torch.pi/8)*
@@ -124,22 +124,24 @@ class post_processing():
         return res.to(torch.float32)
     
     def parameter_maps(self, out_maps):
-        'Get the parameter maps from the output'
+        """
+        Get the parameter maps from the output
+        """
         s_0, d_1 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
         d_2, f, sigma_g = out_maps[:, 2:3, :, :], out_maps[:, 3:4, :, :], out_maps[:, 4:5, :, :]
         
         s_0 = self.sigmoid_cons(s_0, 0.5, 1.5)
-        d_1 = self.sigmoid_cons(d_1, 0, 4)
-        d_2 = self.sigmoid_cons(d_2, 0, 0.1)
-        f = self.sigmoid_cons(f, 0.1, 0.9)
-        sigma_g = self.sigmoid_cons(sigma_g, 0.01, 0.2)
+        d_1 = self.sigmoid_cons(d_1, 2., 2.4)
+        d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
+        f = self.sigmoid_cons(f, 0.5, 0.9)
+        sigma_g = self.sigmoid_cons(sigma_g, 0.0, 40.)
 
         return s_0, d_1, d_2, f, sigma_g
 
     def biexp(self, s_0, d_1, d_2, f, b):
-        '''
-        Reconstuct the denoised signal using the output parameter maps
-        '''
+        """
+        """
+        
         'vb (num of slices, b values, h, w)'
         b = b.view(1, len(b), 1, 1)
 
@@ -152,9 +154,44 @@ class post_processing():
         """
         return dmin+torch.sigmoid(param)*(dmax-dmin)
 
+class simulateDataset():
+    """
+    Simulate the data, the s_0 is normailized to 1
+    """
+    def __init__(self, num_images, sigma_low=5, sigma_high=40):
+        self.d_1 = np.random.uniform(low=2, high=2.4, size=(num_images, 1, 240, 240))
+        self.d_2 = np.random.uniform(low=0.1, high=0.5, size=(num_images, 1, 240, 240))
+        self.f = np.random.uniform(low=0.5, high=0.9, size=(num_images, 1, 240, 240))
+        self.b = np.linspace(0, 3000, 21)
+        self.sigma_g = np.random.uniform(sigma_low,sigma_high,(num_images, 1, 240, 240))
+        self.s_0 = 1
+
+    def biexp(self):
+        """
+        Biexp model to get the denoised signal
+        """
+
+        b = self.b.reshape(1, len(self.b), 1, 1)
+        v = self.f * np.exp(- b * self.d_1 * 1e-3) + (1 - self.f) * np.exp(- b * self.d_2 * 1e-3)
+
+        'normalized the s_o to 1 and discard the first term which is s_0'
+        return v[:, 1:, :, :] / v[:, 0:1, :, :]
+
+    def rice_exp(self, v):
+        """
+        Get the reconstructed the rician exponential model
+        """
+
+        t = v / self.sigma_g
+        res = self.sigma_g*(sqrt(np.pi/8)*
+                        ((2+t**2)*special.i0e(t**2/4)+
+                        t**2*special.i1e(t**2/4)))
+
+        return res
+
 class patientDataset(Dataset):
     '''
-    Simulate a toy dataset to see if the training code can work. Data from random normal distribution
+    wrap the patient numpy data to be dealt by the dataloader
     '''
     def __init__(self, data):
         super(Dataset).__init__()
@@ -170,3 +207,4 @@ class patientDataset(Dataset):
         sample = {'image': image}
 
         return sample
+        
