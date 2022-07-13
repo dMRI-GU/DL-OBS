@@ -88,7 +88,7 @@ class post_processing():
 
         super().__init__()
     
-    def evaluate(self, val_loader, b, net):
+    def evaluate(self, val_loader, b, net, device):
         """
         evlaute the performance of network 
         """
@@ -100,8 +100,8 @@ class post_processing():
 
         for batch in val_loader:
             images = batch['image']
-            images = images.to(self.device, type=torch.float32)
 
+            images = images.to(device=device, dtype=torch.float32)
             out = net(images)
             s_0, d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out)
             params_val = {'s_0':s_0, 'd_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma_g}
@@ -129,12 +129,12 @@ class post_processing():
         """
         s_0, d_1 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
         d_2, f, sigma_g = out_maps[:, 2:3, :, :], out_maps[:, 3:4, :, :], out_maps[:, 4:5, :, :]
-        
+       
         s_0 = self.sigmoid_cons(s_0, 0.5, 1.5)
-        d_1 = self.sigmoid_cons(d_1, 2., 2.4)
-        d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
-        f = self.sigmoid_cons(f, 0.5, 0.9)
-        sigma_g = self.sigmoid_cons(sigma_g, 0.0, 40.)
+        d_1 = self.sigmoid_cons(d_1, 0., 4)
+        d_2 = self.sigmoid_cons(d_2, 0, 0.6)
+        f = self.sigmoid_cons(f, 0.1, 0.9)
+        sigma_g = self.sigmoid_cons(sigma_g, 5.0, 40.)
 
         return s_0, d_1, d_2, f, sigma_g
 
@@ -149,8 +149,6 @@ class post_processing():
 
     def sigmoid_cons(self, param, dmin, dmax):
         """
-        params: parameter array
-        cons: constraints cons[0]: lower bound cons[1]: upper bound
         """
         return dmin+torch.sigmoid(param)*(dmax-dmin)
 
