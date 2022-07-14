@@ -64,9 +64,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 with torch.cuda.amp.autocast(enabled=amp):
                     out_maps = net(images)
 
-                    s_0, d_1, d_2, f, sigma_g = post_process.parameter_maps(out_maps)
+                    d_1, d_2, f, sigma_g = post_process.parameter_maps(out_maps)
 
-                    v = post_process.biexp(s_0, d_1, d_2, f, b)
+                    v = post_process.biexp(d_1, d_2, f, b)
                     M = post_process.rice_exp(v, sigma_g)
                     loss = criterion(M, images)
 
@@ -94,22 +94,27 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                             histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
                             histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
                         
-                        val_loss, params = post_process.evaluate(val_loader, b, net, device)
+                        val_loss, params, M, img = post_process.evaluate(val_loader, b, net, device)
                         scheduler.step(val_loss)
 
                         logging.info('Validation Loss: {}'.format(val_loss))
                         
                         experiment.log({
-                            'learning rate': optimizer.param_groups[0]['lr'],
-                            'validation Loss': val_loss,
-                            's0': wandb.Image(params['s_0'][0].cpu()),
-                            'd1': wandb.Image(params['d_1'][0].cpu()),
-                            'd2': wandb.Image(params['d_2'][0].cpu()),
-                            'f': wandb.Image(params['f'][0].cpu()),
-                            'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
-                            'step': global_step,
-                            'epoch': epoch,
-                            **histograms
+                                        'learning rate': optimizer.param_groups[0]['lr'],
+                                        'validation Loss': val_loss,
+                                        'Max M': M.cpu().max(),
+                                        'Min M': M.cpu().min(),
+                                        'max Image': img.cpu().max(),
+                                        'min Image': img.cpu().min(),
+                                        'd1': wandb.Image(params['d_1'][0].cpu()),
+                                        'd2': wandb.Image(params['d_2'][0].cpu()),
+                                        'f': wandb.Image(params['f'][0].cpu()),
+                                        'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
+                                        'M': wandb.Image(M.cpu()),
+                                        'image': wandb.Image(img.cpu()),
+                                        'step': global_step,
+                                        'epoch': epoch,
+                                        **histograms
                         })
 
         if save_checkpoint:
@@ -120,8 +125,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=10, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=4, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-6,
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--scale', '-s', type=float, default=0.5, help='Downscaling factor of the images')
@@ -129,7 +134,7 @@ def get_args():
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=5, help='Number of classes')
+    parser.add_argument('--classes', '-c', type=int, default=4, help='Number of classes')
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
 
@@ -141,11 +146,17 @@ if __name__ == '__main__':
     data_dir = 'save_npy'
     load = load_data(data_dir)
 
-    '[num_slices(batch_size), num_diff_dir, H, W]'
+    '[num_slices, num_diff_dir, H, W]'
     data = load.image_data(args.dir)
-
     'swap the dimension of'
     data = data.transpose(1, 0, 2, 3)
+    data = load.crop_image(data)
+    
+    num_slices = data.shape[0] 
+
+    idx = np.random.permutation(num_slices)
+    data = data[idx, :, :, :]
+
     data_set = patientDataset(data)
     logging.info(f'TRAING DATA SIZE: {data.shape}')
     

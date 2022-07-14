@@ -53,7 +53,7 @@ class load_data():
 
         return names
 
-    def image_data(self, dir = 'M'):
+    def image_data(self, dir = 'M', normalize=True):
         """
         get the image data of the corresponding diffusion direction 
         (slices as batch size) 
@@ -66,7 +66,10 @@ class load_data():
             image_data = data['image_data']
             
             image_b0 = data['image_b0']
-            image_b0[image_b0 == 0] = 1
+            if normalize:
+                image_b0[image_b0 == 0] = 1
+            else:
+                image_b0 = 1
 
             image_data_normalized = image_data / image_b0 
             
@@ -79,6 +82,13 @@ class load_data():
             data_list.append(image_dir)
 
         return np.concatenate(tuple(data_list), axis=1)
+    
+    def crop_image(self, images):
+        """
+        (num_slices, 20, H, W)
+        """
+        return images[:, :, 20:-20, :]
+
 
 class post_processing():
     """
@@ -97,20 +107,20 @@ class post_processing():
         val_losses = 0
 
         params_val = dict()
-
+        
         for batch in val_loader:
             images = batch['image']
 
             images = images.to(device=device, dtype=torch.float32)
             out = net(images)
-            s_0, d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out)
-            params_val = {'s_0':s_0, 'd_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma_g}
+            d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out)
+            params_val = {'d_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma_g}
             
-            v = self.biexp(s_0, d_1, d_2, f, b)
+            v = self.biexp(d_1, d_2, f, b)
             M = self.rice_exp(v, sigma_g)
             val_losses += loss(M, images).item()
-        
-        return val_losses, params_val
+
+        return val_losses, params_val, M[0, 0, :, :], images[0, 0, :, :]
 
     def rice_exp(self, v, sigma_g):
         """
@@ -120,32 +130,32 @@ class post_processing():
         res= sigma_g*(sqrt(torch.pi/8)*
                         ((2+t**2)*torch.special.i0e(t**2/4)+
                         t**2*torch.special.i1e(t**2/4)))
+        res = res.to(torch.float32)
 
-        return res.to(torch.float32)
-    
+        return res
+
     def parameter_maps(self, out_maps):
         """
         Get the parameter maps from the output
         """
-        s_0, d_1 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
-        d_2, f, sigma_g = out_maps[:, 2:3, :, :], out_maps[:, 3:4, :, :], out_maps[:, 4:5, :, :]
+        d_1, d_2 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
+        f, sigma_g = out_maps[:, 2:3, :, :], out_maps[:, 3:4, :, :]
        
-        s_0 = self.sigmoid_cons(s_0, 0.5, 1.5)
-        d_1 = self.sigmoid_cons(d_1, 0., 4)
-        d_2 = self.sigmoid_cons(d_2, 0, 0.6)
-        f = self.sigmoid_cons(f, 0.1, 0.9)
-        sigma_g = self.sigmoid_cons(sigma_g, 5.0, 40.)
+        d_1 = self.sigmoid_cons(d_1, 1.9, 2.6)
+        d_2 = self.sigmoid_cons(d_2, 0.05, 0.7)
+        f = self.sigmoid_cons(f, 0.3, 1.0)
+        sigma_g = self.sigmoid_cons(sigma_g, 0, 12)
 
-        return s_0, d_1, d_2, f, sigma_g
+        return d_1, d_2, f, sigma_g
 
-    def biexp(self, s_0, d_1, d_2, f, b):
+    def biexp(self, d_1, d_2, f, b):
         """
         """
         
         'vb (num of slices, b values, h, w)'
         b = b.view(1, len(b), 1, 1)
 
-        return s_0 *(f * torch.exp(- b * d_1  * 1e-3) + (1 - f) * torch.exp(- b * d_2 * 1e-3))
+        return f * torch.exp(- b * d_1  * 1e-3) + (1 - f) * torch.exp(- b * d_2 * 1e-3)
 
     def sigmoid_cons(self, param, dmin, dmax):
         """
