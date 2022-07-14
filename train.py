@@ -3,6 +3,7 @@ from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
 from utils import load_data, post_processing, patientDataset, init_weights
 from model.unet_model import UNet
+from model.unet_2decoder import UNet_2Decoders
 from pathlib import Path
 import logging
 import numpy as np
@@ -125,9 +126,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=10, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
+    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=7, help='Number of epochs')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=5, help='Batch size')
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-6,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
@@ -165,7 +166,7 @@ if __name__ == '__main__':
     logging.info(f'Using device {device}')
 
     # Change here to adapt to your data
-    net = UNet(n_channels=data.shape[1], n_classes=args.classes, bilinear=args.bilinear)
+    net = UNet_2Decoders(n_channels=data.shape[1], n_classes=args.classes, bilinear=args.bilinear)
 
     logging.info(f'Network:\n'
                  f'\t{net.n_channels} input channels\n'
