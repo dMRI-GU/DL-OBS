@@ -118,7 +118,8 @@ class post_processing():
             
             v = self.biexp(d_1, d_2, f, b)
             M = self.rice_exp(v, sigma_g)
-            val_losses += loss(M, images).item()
+            loss_value = loss(M, images).item()  
+            val_losses += loss_value
 
         return val_losses, params_val, M[0, 0, :, :], images[0, 0, :, :]
 
