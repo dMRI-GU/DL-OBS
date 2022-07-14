@@ -112,9 +112,9 @@ class post_processing():
             images = batch['image']
 
             images = images.to(device=device, dtype=torch.float32)
-            out = net(images)
-            d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out)
-            params_val = {'d_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma_g}
+            out, sigma = net(images)
+            d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out, sigma_g=sigma)
+            params_val = {'d_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma}
             
             v = self.biexp(d_1, d_2, f, b)
             M = self.rice_exp(v, sigma_g)
@@ -135,12 +135,12 @@ class post_processing():
 
         return res
 
-    def parameter_maps(self, out_maps):
+    def parameter_maps(self, out_maps, sigma_g):
         """
         Get the parameter maps from the output
         """
         d_1, d_2 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
-        f, sigma_g = out_maps[:, 2:3, :, :], out_maps[:, 3:4, :, :]
+        f = out_maps[:, 2:3, :, :]
        
         d_1 = self.sigmoid_cons(d_1, 1.9, 2.6)
         d_2 = self.sigmoid_cons(d_2, 0.05, 0.7)

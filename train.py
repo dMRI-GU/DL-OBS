@@ -62,9 +62,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 images = images.to(device=device, dtype=torch.float32)
 
                 with torch.cuda.amp.autocast(enabled=amp):
-                    out_maps = net(images)
+                    out_maps, sigma_g = net(images)
 
-                    d_1, d_2, f, sigma_g = post_process.parameter_maps(out_maps)
+                    d_1, d_2, f, sigma_g = post_process.parameter_maps(out_maps, sigma_g)
 
                     v = post_process.biexp(d_1, d_2, f, b)
                     M = post_process.rice_exp(v, sigma_g)
@@ -126,15 +126,15 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=10, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=5, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-6,
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=True, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=4, help='Number of classes')
+    parser.add_argument('--classes', '-c', type=int, default=3, help='Number of classes')
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
 
