@@ -14,7 +14,7 @@ import torch
 dir_checkpoint = Path('./checkpoints/')
 
 def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, 
-                val_percent: float=0.1, save_checkpoint: bool=True, amp: bool = False):
+                val_percent: float=0.1, save_checkpoint: bool=False, amp: bool = False):
     
     # split into training and validation set
     n_val = int(len(dataset) * val_percent)
@@ -65,9 +65,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 with torch.cuda.amp.autocast(enabled=amp):
                     out_maps, sigma_g = net(images)
 
-                    d_1, d_2, f, sigma_g = post_process.parameter_maps(out_maps, sigma_g)
+                    s_0, d_1, d_2, f, sigma_g = post_process.parameter_maps(out_maps, sigma_g)
 
-                    v = post_process.biexp(d_1, d_2, f, b)
+                    v = post_process.biexp(s_0, d_1, d_2, f, b)
                     M = post_process.rice_exp(v, sigma_g)
                     loss = criterion(M, images)
 
@@ -75,6 +75,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 grad_scaler.scale(loss).backward()
                 grad_scaler.step(optimizer)
                 grad_scaler.update()
+                epoch_loss += loss.item()
 
                 pbar.update(images.shape[0])
                 global_step += 1
@@ -123,19 +124,22 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             torch.save( net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
+        experiment.log({
+            'Traning epoch loss': epoch_loss, 'epoch': epoch
+        })
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=7, help='Number of epochs')
+    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=6, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=5, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-6,
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=5e-6,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=True, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=3, help='Number of classes')
+    parser.add_argument('--classes', '-c', type=int, default=4, help='Number of classes')
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
 
@@ -148,15 +152,12 @@ if __name__ == '__main__':
     load = load_data(data_dir)
 
     '[num_slices, num_diff_dir, H, W]'
-    data = load.image_data(args.dir)
+    data = load.image_data(args.dir, normalize=False)
     'swap the dimension of'
     data = data.transpose(1, 0, 2, 3)
     data = load.crop_image(data)
     
     num_slices = data.shape[0] 
-
-    idx = np.random.permutation(num_slices)
-    data = data[idx, :, :, :]
 
     data_set = patientDataset(data)
     logging.info(f'TRAING DATA SIZE: {data.shape}')

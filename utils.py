@@ -113,10 +113,10 @@ class post_processing():
 
             images = images.to(device=device, dtype=torch.float32)
             out, sigma = net(images)
-            d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out, sigma_g=sigma)
+            s_0, d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out, sigma_g=sigma)
             params_val = {'d_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma}
             
-            v = self.biexp(d_1, d_2, f, b)
+            v = self.biexp(s_0, d_1, d_2, f, b)
             M = self.rice_exp(v, sigma_g)
             loss_value = loss(M, images).item()  
             val_losses += loss_value
@@ -140,23 +140,24 @@ class post_processing():
         Get the parameter maps from the output
         """
         d_1, d_2 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
-        f = out_maps[:, 2:3, :, :]
+        f, s_0 = out_maps[:, 2:3, :, :], out_maps[:, 3:4, :, :]
        
         d_1 = self.sigmoid_cons(d_1, 1.9, 2.6)
         d_2 = self.sigmoid_cons(d_2, 0.05, 0.7)
         f = self.sigmoid_cons(f, 0.3, 1.0)
+        s_0 = self.sigmoid_cons(s_0, 0.1, 10)
         sigma_g = self.sigmoid_cons(sigma_g, 0, 12)
 
-        return d_1, d_2, f, sigma_g
+        return s_0, d_1, d_2, f, sigma_g
 
-    def biexp(self, d_1, d_2, f, b):
+    def biexp(self, s_0, d_1, d_2, f, b):
         """
         """
         
         'vb (num of slices, b values, h, w)'
         b = b.view(1, len(b), 1, 1)
 
-        return f * torch.exp(- b * d_1  * 1e-3) + (1 - f) * torch.exp(- b * d_2 * 1e-3)
+        return s_0 * (f * torch.exp(- b * d_1  * 1e-3) + (1 - f) * torch.exp(- b * d_2 * 1e-3))
 
     def sigmoid_cons(self, param, dmin, dmax):
         """
