@@ -98,7 +98,7 @@ class post_processing():
 
         super().__init__()
     
-    def evaluate(self, val_loader, b, net, device):
+    def evaluate(self, val_loader, b, net, device, step):
         """
         evlaute the performance of network 
         """
@@ -118,8 +118,15 @@ class post_processing():
             
             v = self.biexp(s_0, d_1, d_2, f, b)
             M = self.rice_exp(v, sigma_g)
-            loss_value = loss(M, images).item()  
+
+            mse_loss = loss(M, images).item() 
+            loss_value = torch.sqrt(torch.tensor(mse_loss))  
             val_losses += loss_value
+        
+        m = M[0, 0, :, :]
+        img = images[0, 0, :, :]
+        np.save(f'./Images/img{step}.npy', img.cpu().detach().numpy())
+        np.save(f'./Ms/M{step}.npy', m.cpu().detach().numpy())
 
         return val_losses, params_val, M[0, 0, :, :], images[0, 0, :, :]
 
@@ -142,11 +149,16 @@ class post_processing():
         d_1, d_2 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
         f, s_0 = out_maps[:, 2:3, :, :], out_maps[:, 3:4, :, :]
        
-        d_1 = self.sigmoid_cons(d_1, 1.9, 2.6)
-        d_2 = self.sigmoid_cons(d_2, 0.05, 0.7)
-        f = self.sigmoid_cons(f, 0.3, 1.0)
-        s_0 = self.sigmoid_cons(s_0, 0.1, 10)
-        sigma_g = self.sigmoid_cons(sigma_g, 0, 12)
+        # make sure D1 is the larger value between D1 and D2
+        if torch.mean(d_1) < torch.mean(d_2):
+            d_1, d_2 = d_2, d_1
+            f = 1 - f 
+
+        d_1 = self.sigmoid_cons(d_1, 1.6, 3.)
+        d_2 = self.sigmoid_cons(d_2, 0.05, 0.9)
+        f = self.sigmoid_cons(f, 0.2, 1.1)
+        s_0 = self.sigmoid_cons(s_0, 0.001, 1000)
+        sigma_g = self.sigmoid_cons(sigma_g, 0, 50)
 
         return s_0, d_1, d_2, f, sigma_g
 

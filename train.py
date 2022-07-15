@@ -41,7 +41,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     ''')
 
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=1)
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.MSELoss()
     global_step = 0
@@ -69,13 +69,12 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
                     v = post_process.biexp(s_0, d_1, d_2, f, b)
                     M = post_process.rice_exp(v, sigma_g)
-                    loss = criterion(M, images)
+                    loss =  torch.sqrt(criterion(M, images)) * 10 
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
                 grad_scaler.step(optimizer)
                 grad_scaler.update()
-                epoch_loss += loss.item()
 
                 pbar.update(images.shape[0])
                 global_step += 1
@@ -97,7 +96,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                             histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
                             histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
                         """
-                        val_loss, params, M, img = post_process.evaluate(val_loader, b, net, device)
+                        val_loss, params, M, img = post_process.evaluate(val_loader, b, net, device, global_step)
                         scheduler.step(val_loss)
 
                         logging.info('Validation Loss: {}'.format(val_loss))
@@ -124,15 +123,12 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             torch.save( net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
-        experiment.log({
-            'Traning epoch loss': epoch_loss, 'epoch': epoch
-        })
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=6, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=5, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=5e-6,
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-6,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
