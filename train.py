@@ -38,7 +38,6 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
         Validation size: {n_val}
         Checkpoints:     {save_checkpoint}
         Device:          {device.type}
-        Mixed Precision: {amp}
     ''')
 
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
@@ -65,9 +64,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
                 images = images.to(device=device, dtype=torch.float32)
 
-                with torch.cuda.amp.autocast(enabled=amp):
-                    M, d_1, d_2, f, sigma = net(images)
-                    loss =  criterion(M, images)
+                M, d_1, d_2, f, sigma = net(images)
+                loss =  criterion(M, images)
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -111,7 +109,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                                         'Min M': M.cpu().min(),
                                         'max Image': img.cpu().max(),
                                         'min Image': img.cpu().min(),
-                                        'division_step': division_step(),
+                                        'division_step': division_step,
                                         'd1': wandb.Image(params['d_1'][0].cpu()),
                                         'd2': wandb.Image(params['d_2'][0].cpu()),
                                         'f': wandb.Image(params['f'][0].cpu()),

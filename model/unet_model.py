@@ -9,7 +9,7 @@ class UNet(nn.Module):
         super(UNet, self).__init__()
         self.n_channels = n_channels
         self.n_classes = 4
-        self.b_values = b_values
+        self.b_values = b_values.reshape(1, len(b_values), 1, 1)
         self.bilinear = bilinear
         self.rice = rice
 
@@ -50,7 +50,7 @@ class UNet(nn.Module):
         d_1 = self.sigmoid_cons(d_1, 2, 2.4)
         d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
         f = self.sigmoid_cons(f, 0.5, 0.9)
-        sigma_g = self.sigmoid_cons(sigma_g, 0, 0.2)
+        sigma_g = self.sigmoid_cons(sigma, 0, 0.2)
 
         v = f*torch.exp(-self.b_values*d_1) + (1-f)*torch.exp(-self.b_values*d_2)
 
