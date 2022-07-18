@@ -112,98 +112,14 @@ class post_processing():
             images = batch['image']
 
             images = images.to(device=device, dtype=torch.float32)
-            out, sigma = net(images)
-            d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out, sigma_g=sigma)
-            params_val = {'d_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma}
-            
-            v = self.biexp(s_0, d_1, d_2, f, b)
-            M = self.rice_exp(v, sigma_g)
+            M, d_1, d_2, f, sigma_g = net(images)
+            params_val = {'d_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma_g}
 
             mse_loss = loss(M, images).item() 
-            loss_value = torch.sqrt(torch.tensor(mse_loss))  
+            loss_value = torch.tensor(mse_loss)
             val_losses += loss_value
 
         return val_losses, params_val, M[0, 0, :, :], images[0, 0, :, :]
-
-    def rice_exp(self, v, sigma_g):
-        """
-        """
-
-        t = v / sigma_g
-        res= sigma_g*(sqrt(torch.pi/8)*
-                        ((2+t**2)*torch.special.i0e(t**2/4)+
-                        t**2*torch.special.i1e(t**2/4)))
-        res = res.to(torch.float32)
-
-        return res
-
-    def parameter_maps(self, out_maps, sigma_g):
-        """
-        Get the parameter maps from the output
-        """
-        d_1, d_2 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
-        f = out_maps[:, 2:3, :, :]
-       
-        # make sure D1 is the larger value between D1 and D2
-        if torch.mean(d_1) < torch.mean(d_2):
-            d_1, d_2 = d_2, d_1
-            f = 1 - f 
-
-        d_1 = self.sigmoid_cons(d_1, 2, 2.4)
-        d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
-        f = self.sigmoid_cons(f, 0.5, 0.9)
-        sigma_g = self.sigmoid_cons(sigma_g, 0, 0.1)
-
-        return  d_1, d_2, f, sigma_g
-
-    def biexp(self, s_0, d_1, d_2, f, b):
-        """
-        """
-        
-        'vb (num of slices, b values, h, w)'
-        b = b.view(1, len(b), 1, 1)
-
-        return s_0 * (f * torch.exp(- b * d_1  * 1e-3) + (1 - f) * torch.exp(- b * d_2 * 1e-3))
-
-    def sigmoid_cons(self, param, dmin, dmax):
-        """
-        """
-        return dmin+torch.sigmoid(param)*(dmax-dmin)
-
-class simulateDataset():
-    """
-    Simulate the data, the s_0 is normailized to 1
-    """
-    def __init__(self, num_images, sigma_low=5, sigma_high=40):
-        self.d_1 = np.random.uniform(low=2, high=2.4, size=(num_images, 1, 240, 240))
-        self.d_2 = np.random.uniform(low=0.1, high=0.5, size=(num_images, 1, 240, 240))
-        self.f = np.random.uniform(low=0.5, high=0.9, size=(num_images, 1, 240, 240))
-        self.b = np.linspace(0, 3000, 21)
-        self.sigma_g = np.random.uniform(sigma_low,sigma_high,(num_images, 1, 240, 240))
-        self.s_0 = 1
-
-    def biexp(self):
-        """
-        Biexp model to get the denoised signal
-        """
-
-        b = self.b.reshape(1, len(self.b), 1, 1)
-        v = self.f * np.exp(- b * self.d_1 * 1e-3) + (1 - self.f) * np.exp(- b * self.d_2 * 1e-3)
-
-        'normalized the s_o to 1 and discard the first term which is s_0'
-        return v[:, 1:, :, :] / v[:, 0:1, :, :]
-
-    def rice_exp(self, v):
-        """
-        Get the reconstructed the rician exponential model
-        """
-
-        t = v / self.sigma_g
-        res = self.sigma_g*(sqrt(np.pi/8)*
-                        ((2+t**2)*special.i0e(t**2/4)+
-                        t**2*special.i1e(t**2/4)))
-
-        return res
 
 class patientDataset(Dataset):
     '''

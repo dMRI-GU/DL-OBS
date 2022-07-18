@@ -1,3 +1,4 @@
+from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
@@ -14,7 +15,7 @@ import torch
 dir_checkpoint = Path('./checkpoints/')
 
 def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, 
-                val_percent: float=0.1, save_checkpoint: bool=False, amp: bool = False):
+                val_percent: float=0.1, save_checkpoint: bool=False):
     
     # split into training and validation set
     n_val = int(len(dataset) * val_percent)
@@ -27,7 +28,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
     experiment = wandb.init(project='UNet-Denoise', resume='allow', anonymous='must')
     experiment.config.update(dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-                                  val_percent=val_percent, save_checkpoint=save_checkpoint, amp=amp))
+                                  val_percent=val_percent, save_checkpoint=save_checkpoint))
 
     logging.info(f'''Starting training:
         Epochs:          {epochs}
@@ -42,7 +43,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=1)
-    grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
+    
     criterion = nn.MSELoss()
     global_step = 0
 
@@ -50,6 +51,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
     for epoch in range(1, epochs+1):
         net.train()
+
+        best = 1e6    
         epoch_loss = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
@@ -63,18 +66,18 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 images = images.to(device=device, dtype=torch.float32)
 
                 with torch.cuda.amp.autocast(enabled=amp):
-                    out_maps, sigma_g = net(images)
-
-                    s_0, d_1, d_2, f, sigma_g = post_process.parameter_maps(out_maps, sigma_g)
-
-                    v = post_process.biexp(s_0, d_1, d_2, f, b)
-                    M = post_process.rice_exp(v, sigma_g)
-                    loss =  torch.sqrt(criterion(M, images)) * 10 
+                    M, d_1, d_2, f, sigma = net(images)
+                    loss =  criterion(M, images)
 
                 optimizer.zero_grad(set_to_none=True)
-                grad_scaler.scale(loss).backward()
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+
+                if epoch_loss < best:
+                    final_model = net.state_dict()
+                    best = epoch_loss
+
 
                 pbar.update(images.shape[0])
                 global_step += 1
@@ -108,6 +111,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                                         'Min M': M.cpu().min(),
                                         'max Image': img.cpu().max(),
                                         'min Image': img.cpu().min(),
+                                        'division_step': division_step(),
                                         'd1': wandb.Image(params['d_1'][0].cpu()),
                                         'd2': wandb.Image(params['d_2'][0].cpu()),
                                         'f': wandb.Image(params['f'][0].cpu()),
@@ -124,18 +128,18 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
             torch.save( net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
 
+    return final_model
+
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=6, help='Number of epochs')
+    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=10, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-6,
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-4,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
-    parser.add_argument('--amp', action='store_true', default=True, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=3, help='Number of classes')
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
 
@@ -152,18 +156,22 @@ if __name__ == '__main__':
     'swap the dimension of'
     data = data.transpose(1, 0, 2, 3)
     data = load.crop_image(data)
-    
-    num_slices = data.shape[0] 
 
-    data_set = patientDataset(data)
-    logging.info(f'TRAING DATA SIZE: {data.shape}')
+    trainX, testX = train_test_split(data, test_size=0.1, random_state=42)
     
+    num_slices = trainX.shape[0] 
+
+    data_set = patientDataset(trainX)
+
+    logging.info(f'TRAING DATA SIZE: {data.shape}')
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
-    # Change here to adapt to your data
-    net = UNet_2Decoders(n_channels=data.shape[1], n_classes=args.classes, bilinear=args.bilinear)
+    b = torch.linspace(0, 3000, steps=21, device=device)
+    b = b[1:]
+
+    net = UNet(n_channels=data.shape[1], b_values=b, bilinear=args.bilinear)
 
     logging.info(f'Network:\n'
                  f'\t{net.n_channels} input channels\n'
@@ -176,9 +184,6 @@ if __name__ == '__main__':
 
     net.to(device=device)
     net.apply(init_weights)
-    b = torch.linspace(0, 3000, steps=net.n_channels + 1, device=device)
-    'discard the value 0'
-    b = b[1:]
 
     try:
         train_net(dataset=data_set,
@@ -189,9 +194,8 @@ if __name__ == '__main__':
                   batch_size=args.batch_size,
                   learning_rate=args.lr,
                   val_percent=args.val / 100,
-                  amp=args.amp)
+                  )
     except KeyboardInterrupt:
         torch.save(net.state_dict(), 'INTERRUPTED.pth')
         logging.info('Saved interrupt')
         raise
-    

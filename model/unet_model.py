@@ -1,14 +1,17 @@
 """ Full assembly of the parts to form the complete network """
 
 from model.unet_parts import *
+from cmath import sqrt
 
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, n_classes, bilinear=False):
+    def __init__(self, n_channels, b_values, rice = True, bilinear=False):
         super(UNet, self).__init__()
         self.n_channels = n_channels
-        self.n_classes = n_classes
+        self.n_classes = 4
+        self.b_values = b_values
         self.bilinear = bilinear
+        self.rice = rice
 
         self.inc = DoubleConv(n_channels, 64)
         self.down1 = Down(64, 128)
@@ -20,7 +23,7 @@ class UNet(nn.Module):
         self.up2 = Up(512, 256 // factor, bilinear)
         self.up3 = Up(256, 128 // factor, bilinear)
         self.up4 = Up(128, 64, bilinear)
-        self.outc = OutConv(64, n_classes)
+        self.outc = OutConv(64, 4)
 
     def forward(self, x):
         x1 = self.inc(x)
@@ -33,4 +36,41 @@ class UNet(nn.Module):
         x = self.up3(x, x2)
         x = self.up4(x, x1)
         logits = self.outc(x)
-        return logits
+
+        d_1 = logits[:, 0:1, :, :]
+        d_2 = logits[:, 1:2, :, :]
+        f = logits[:, 2:3, :, :]
+        sigma = logits[:, 3:4, :, :]
+
+        # make sure D1 is the larger value between D1 and D2
+        if torch.mean(d_1) < torch.mean(d_2):
+            d_1, d_2 = d_2, d_1
+            f = 1 - f 
+
+        d_1 = self.sigmoid_cons(d_1, 2, 2.4)
+        d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
+        f = self.sigmoid_cons(f, 0.5, 0.9)
+        sigma_g = self.sigmoid_cons(sigma_g, 0, 0.2)
+
+        v = f*torch.exp(-self.b_values*d_1) + (1-f)*torch.exp(-self.b_values*d_2)
+
+        # normalized with respect to first b value image
+        v = v / v[0:1]
+
+        # add the rice-bias
+        if self.rice:
+            t = v / sigma
+            res= sigma*(sqrt(torch.pi/8)*
+                            ((2+t**2)*torch.special.i0e(t**2/4)+
+                            t**2*torch.special.i1e(t**2/4)))
+            res = res.to(torch.float32)
+        else:
+            res = v
+
+        return res, d_1, d_2, f, sigma
+
+    def sigmoid_cons(self, param, dmin, dmax):
+        """
+        constrain the output physilogical parameters into a certain domain
+        """
+        return dmin+torch.sigmoid(param)*(dmax-dmin)
