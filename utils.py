@@ -113,7 +113,7 @@ class post_processing():
 
             images = images.to(device=device, dtype=torch.float32)
             out, sigma = net(images)
-            s_0, d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out, sigma_g=sigma)
+            d_1, d_2, f, sigma_g = self.parameter_maps(out_maps=out, sigma_g=sigma)
             params_val = {'d_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma}
             
             v = self.biexp(s_0, d_1, d_2, f, b)
@@ -122,11 +122,6 @@ class post_processing():
             mse_loss = loss(M, images).item() 
             loss_value = torch.sqrt(torch.tensor(mse_loss))  
             val_losses += loss_value
-        
-        m = M[0, 0, :, :]
-        img = images[0, 0, :, :]
-        np.save(f'./Images/img{step}.npy', img.cpu().detach().numpy())
-        np.save(f'./Ms/M{step}.npy', m.cpu().detach().numpy())
 
         return val_losses, params_val, M[0, 0, :, :], images[0, 0, :, :]
 
@@ -147,20 +142,19 @@ class post_processing():
         Get the parameter maps from the output
         """
         d_1, d_2 = out_maps[:, 0:1, :, :], out_maps[:, 1:2, :, :]
-        f, s_0 = out_maps[:, 2:3, :, :], out_maps[:, 3:4, :, :]
+        f = out_maps[:, 2:3, :, :]
        
         # make sure D1 is the larger value between D1 and D2
         if torch.mean(d_1) < torch.mean(d_2):
             d_1, d_2 = d_2, d_1
             f = 1 - f 
 
-        d_1 = self.sigmoid_cons(d_1, 1.6, 3.)
-        d_2 = self.sigmoid_cons(d_2, 0.05, 0.9)
-        f = self.sigmoid_cons(f, 0.2, 1.1)
-        s_0 = self.sigmoid_cons(s_0, 0.001, 1000)
-        sigma_g = self.sigmoid_cons(sigma_g, 0, 50)
+        d_1 = self.sigmoid_cons(d_1, 2, 2.4)
+        d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
+        f = self.sigmoid_cons(f, 0.5, 0.9)
+        sigma_g = self.sigmoid_cons(sigma_g, 0, 0.1)
 
-        return s_0, d_1, d_2, f, sigma_g
+        return  d_1, d_2, f, sigma_g
 
     def biexp(self, s_0, d_1, d_2, f, b):
         """

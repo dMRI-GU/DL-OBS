@@ -135,7 +135,7 @@ def get_args():
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=True, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=4, help='Number of classes')
+    parser.add_argument('--classes', '-c', type=int, default=3, help='Number of classes')
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
 
@@ -148,7 +148,7 @@ if __name__ == '__main__':
     load = load_data(data_dir)
 
     '[num_slices, num_diff_dir, H, W]'
-    data = load.image_data(args.dir, normalize=False)
+    data = load.image_data(args.dir, normalize=True)
     'swap the dimension of'
     data = data.transpose(1, 0, 2, 3)
     data = load.crop_image(data)
