@@ -1,4 +1,3 @@
-from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
@@ -121,8 +120,6 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
             torch.save( net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
 
-    return final_model
-
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=7, help='Number of epochs')
@@ -150,11 +147,9 @@ if __name__ == '__main__':
     data = data.transpose(1, 0, 2, 3)
     data = load.crop_image(data)
 
-    trainX, testX = train_test_split(data, test_size=0.1, random_state=42)
-    
-    num_slices = trainX.shape[0] 
+    num_slices = data.shape[0] 
 
-    data_set = patientDataset(trainX)
+    data_set = patientDataset(data)
 
     logging.info(f'TRAING DATA SIZE: {data.shape}')
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -179,7 +174,7 @@ if __name__ == '__main__':
     net.apply(init_weights)
 
     try:
-        final_model = train_net(dataset=data_set,
+        train_net(dataset=data_set,
                   net=net,
                   device=device,
                   b = b,

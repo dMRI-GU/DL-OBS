@@ -41,6 +41,7 @@ class UNet(nn.Module):
         d_2 = logits[:, 1:2, :, :]
         f = logits[:, 2:3, :, :]
         sigma = logits[:, 3:4, :, :]
+        sigma = torch.abs(sigma)
 
         # make sure D1 is the larger value between D1 and D2
         if torch.mean(d_1) < torch.mean(d_2):
@@ -50,7 +51,6 @@ class UNet(nn.Module):
         d_1 = self.sigmoid_cons(d_1, 2, 2.4)
         d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
         f = self.sigmoid_cons(f, 0.5, 0.9)
-        sigma_g = self.sigmoid_cons(sigma, 0, 0.2)
 
         v = f*torch.exp(-self.b_values*d_1) + (1-f)*torch.exp(-self.b_values*d_2)
 
