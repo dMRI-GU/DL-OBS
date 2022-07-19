@@ -25,12 +25,12 @@ def to_numpy(*argv):
         params.append(arg.cpu().detach().numpy())
     return params
 
-def save_params(**kwargs):
+def save_params(results):
     """
     save the parameters maps and M as numpy array
     """
     Path(result_path).mkdir(parents=True, exist_ok=True)
-    for key, res in kwargs.items():
+    for key, res in results.items():
         np.save(os.path.join(result_path, key), res)
 
 if __name__ == '__main__':
@@ -53,7 +53,7 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     test = torch.from_numpy(testX)
-    test_images = test.to(device=device)
+    test_images = test.to(device=device, dtype=torch.float32)
 
     b = torch.linspace(0, 3000, steps=21, device=device)
     b = b[1:]
@@ -69,4 +69,4 @@ if __name__ == '__main__':
 
     results = {'M.npy': M, 'd1.npy': d_1, 
                 'd2.npy': d_2, 'f.npy': f, 'sigma_g.npy': sigma}
-                
+    save_params(results)
