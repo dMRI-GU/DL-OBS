@@ -52,7 +52,6 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
         net.train()
 
         best = 1e6    
-        epoch_loss = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images = batch['image']
@@ -70,16 +69,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
-                epoch_loss += loss.item()
-
-                if epoch_loss < best:
-                    final_model = net.state_dict()
-                    best = epoch_loss
-
 
                 pbar.update(images.shape[0])
                 global_step += 1
-                epoch_loss += loss.item()
                 experiment.log({
                     'train loss': loss.item(),
                     'step': global_step,
@@ -99,6 +91,10 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                         """
                         val_loss, params, M, img = post_process.evaluate(val_loader, b, net, device, global_step)
                         scheduler.step(val_loss)
+                        
+                        if val_loss < best:
+                            final_model = net.state_dict()
+                            best = val_loss
 
                         logging.info('Validation Loss: {}'.format(val_loss))
                         
@@ -109,7 +105,6 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                                         'Min M': M.cpu().min(),
                                         'max Image': img.cpu().max(),
                                         'min Image': img.cpu().min(),
-                                        'division_step': division_step,
                                         'd1': wandb.Image(params['d_1'][0].cpu()),
                                         'd2': wandb.Image(params['d_2'][0].cpu()),
                                         'f': wandb.Image(params['f'][0].cpu()),
@@ -130,7 +125,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=10, help='Number of epochs')
+    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=7, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-4,
                         help='Learning rate', dest='lr')
@@ -169,7 +164,7 @@ if __name__ == '__main__':
     b = torch.linspace(0, 3000, steps=21, device=device)
     b = b[1:]
 
-    net = UNet(n_channels=data.shape[1], b_values=b, bilinear=args.bilinear)
+    net = UNet(n_channels=data.shape[1], b_values=b, rice=True, bilinear=args.bilinear)
 
     logging.info(f'Network:\n'
                  f'\t{net.n_channels} input channels\n'
@@ -184,7 +179,7 @@ if __name__ == '__main__':
     net.apply(init_weights)
 
     try:
-        train_net(dataset=data_set,
+        final_model = train_net(dataset=data_set,
                   net=net,
                   device=device,
                   b = b,

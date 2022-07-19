@@ -35,7 +35,7 @@ class UNet(nn.Module):
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
-        logits = self.outc(x)
+        logits = torch.abs(self.outc(x))
 
         d_1 = logits[:, 0:1, :, :]
         d_2 = logits[:, 1:2, :, :]
@@ -53,9 +53,6 @@ class UNet(nn.Module):
         sigma_g = self.sigmoid_cons(sigma, 0, 0.2)
 
         v = f*torch.exp(-self.b_values*d_1) + (1-f)*torch.exp(-self.b_values*d_2)
-
-        # normalized with respect to first b value image
-        v = v / v[0:1]
 
         # add the rice-bias
         if self.rice:

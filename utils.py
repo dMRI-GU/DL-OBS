@@ -107,17 +107,18 @@ class post_processing():
         val_losses = 0
 
         params_val = dict()
-        
-        for batch in val_loader:
-            images = batch['image']
+       
+        with torch.no_grad():
+            for batch in val_loader:
+                images = batch['image']
 
-            images = images.to(device=device, dtype=torch.float32)
-            M, d_1, d_2, f, sigma_g = net(images)
-            params_val = {'d_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma_g}
+                images = images.to(device=device, dtype=torch.float32)
+                M, d_1, d_2, f, sigma_g = net(images)
+                params_val = {'d_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma_g}
 
-            mse_loss = loss(M, images).item() 
-            loss_value = torch.tensor(mse_loss)
-            val_losses += loss_value
+                mse_loss = loss(M, images).item() 
+                loss_value = torch.tensor(mse_loss)
+                val_losses += loss_value
 
         return val_losses, params_val, M[0, 0, :, :], images[0, 0, :, :]
 
