@@ -110,7 +110,7 @@ class post_processing():
        
         with torch.no_grad():
             for batch in val_loader:
-                images = batch['image']
+                images = batch
 
                 images = images.to(device=device, dtype=torch.float32)
                 M, d_1, d_2, f, sigma_g = net(images)
@@ -137,7 +137,6 @@ class patientDataset(Dataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
         image = self.data[idx]
-        sample = {'image': image}
 
-        return sample
+        return image
         

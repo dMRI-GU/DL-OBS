@@ -53,7 +53,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
         best = 1e6    
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
-                images = batch['image']
+                images = batch
 
                 assert images.shape[1] == net.n_channels, \
                     f'Network has been defined with {net.n_channels} input channels, ' \
@@ -149,7 +149,7 @@ if __name__ == '__main__':
 
     num_slices = data.shape[0] 
 
-    data_set = patientDataset(data)
+    patientData = patientDataset(data)
 
     logging.info(f'TRAING DATA SIZE: {data.shape}')
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -174,7 +174,7 @@ if __name__ == '__main__':
     net.apply(init_weights)
 
     try:
-        train_net(dataset=data_set,
+        train_net(dataset=patientData,
                   net=net,
                   device=device,
                   b = b,
