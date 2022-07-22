@@ -14,7 +14,7 @@ import torch
 dir_checkpoint = Path('./checkpoints/')
 
 def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, 
-                val_percent: float=0.1, save_checkpoint: bool=False):
+                val_percent: float=0.1, save_checkpoint: bool=True):
     
     # split into training and validation set
     n_val = int(len(dataset) * val_percent)

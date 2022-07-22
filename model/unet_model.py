@@ -48,9 +48,9 @@ class UNet(nn.Module):
             d_1, d_2 = d_2, d_1
             f = 1 - f 
 
-        d_1 = self.sigmoid_cons(d_1, 2, 2.4)
-        d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
-        f = self.sigmoid_cons(f, 0.5, 0.9)
+        #d_1 = self.sigmoid_cons(d_1, 2, 2.4)
+        #d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
+        #f = self.sigmoid_cons(f, 0.5, 0.9)
 
         v = f*torch.exp(-self.b_values*d_1) + (1-f)*torch.exp(-self.b_values*d_2)
 

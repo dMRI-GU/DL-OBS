@@ -10,7 +10,7 @@ result_path = Path('./results/')
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--load', '-f', type=str, default='checkpoints/checkpoint_epoch2.pth',
+    parser.add_argument('--load', '-f', type=str, default='checkpoints/checkpoint_epoch3.pth',
                         help='Load the model to test the result')
 
     return parser.parse_args()
@@ -64,9 +64,14 @@ if __name__ == '__main__':
     net.to(device=device)
     
     M, d_1, d_2, f, sigma = net(test_images)
+    
+    with torch.no_grad():
+        mse = torch.nn.MSELoss()
+        loss = mse(M, test_images)
+        print(loss.item())
 
     M, d_1, d_2, f, sigma = to_numpy(M, d_1, d_2, f, sigma)
 
     results = {'M.npy': M, 'd1.npy': d_1, 
                 'd2.npy': d_2, 'f.npy': f, 'sigma_g.npy': sigma}
-    save_params(results)
+   # save_params(results)
