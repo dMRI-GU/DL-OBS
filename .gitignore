@@ -8,6 +8,8 @@ ana_mri.py
 save_npy/
 test/
 results/
+data&plots/
+deep_denoise/
 ad56_M.npy
 dicom_read.py
 load_pat_data.py
