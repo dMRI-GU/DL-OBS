@@ -83,6 +83,15 @@ class load_data():
 
         return np.concatenate(tuple(data_list), axis=1)
     
+    def image_b0(self):
+        """
+        Get the b0 for all the patients
+        """
+        b0s = [pat['image_b0'] for pat in self.pat_data.values()]
+     
+        "b0 for normalization"
+        return [ np.where(b0 == 0, 1, b0) for b0 in b0s]
+
     def crop_image(self, images):
         """
         (num_slices, 20, H, W)
@@ -102,7 +111,7 @@ class post_processing():
         """
         evlaute the performance of network 
         """
-        loss = torch.nn.MSELoss()
+        loss = torch.nn.L1Loss()
         net.eval()
         val_losses = 0
 
@@ -120,7 +129,7 @@ class post_processing():
                 loss_value = torch.tensor(mse_loss)
                 val_losses += loss_value
 
-        return val_losses, params_val, M[0, 0, :, :], images[0, 0, :, :]
+        return val_losses/len(val_loader), params_val, M[0, 0, :, :], images[0, 0, :, :]
 
 class patientDataset(Dataset):
     '''

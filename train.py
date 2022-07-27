@@ -3,7 +3,7 @@ from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
 from utils import load_data, post_processing, patientDataset, init_weights
 from model.unet_model import UNet
-from model.unet_2decoder import UNet_2Decoders
+from model.unet_MultiDecoder import UNet_MultiDecoders
 from pathlib import Path
 import logging
 import numpy as np
@@ -39,10 +39,10 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
         Device:          {device.type}
     ''')
 
-    optimizer = optim.Adam(net.parameters(), lr=learning_rate)
+    optimizer = optim.SGD(net.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=1)
     
-    criterion = nn.MSELoss()
+    criterion = nn.L1Loss()
     global_step = 0
 
     post_process= post_processing()
@@ -91,10 +91,6 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                         val_loss, params, M, img = post_process.evaluate(val_loader, b, net, device, global_step)
                         scheduler.step(val_loss)
                         
-                        if val_loss < best:
-                            final_model = net.state_dict()
-                            best = val_loss
-
                         logging.info('Validation Loss: {}'.format(val_loss))
                         
                         experiment.log({
@@ -123,8 +119,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=7, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-4,
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
@@ -158,12 +154,13 @@ if __name__ == '__main__':
 
     b = torch.linspace(0, 3000, steps=21, device=device)
     b = b[1:]
-
-    net = UNet(n_channels=data.shape[1], b_values=b, rice=True, bilinear=args.bilinear)
+    
+    'n_channel - 20 b values'
+    net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
 
     logging.info(f'Network:\n'
                  f'\t{net.n_channels} input channels\n'
-                 f'\t{net.n_classes} output channels (classes)\n'
+                 #f'\t{net.n_classes} output channels (classes)\n'
                  f'\t{"Bilinear" if net.bilinear else "Transposed conv"} upscaling')
 
     if args.load:

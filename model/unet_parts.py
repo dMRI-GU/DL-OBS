@@ -38,7 +38,6 @@ class Down(nn.Module):
     def forward(self, x):
         return self.maxpool_conv(x)
 
-
 class Up(nn.Module):
     """Upscaling then double conv"""
 
@@ -67,6 +66,29 @@ class Up(nn.Module):
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
+class Decoder(nn.Module):
+    """Stack several upsampling layers"""
+    def __init__(self, channels, factor, bilinear):
+        """
+        channels - e.g [1024, 512, 256, 128, 64]
+        """
+        super().__init__()
+        self.up1 = Up(channels[0], channels[1] // factor, bilinear)
+        self.up2 = Up(channels[1], channels[2] // factor, bilinear)
+        self.up3 = Up(channels[2], channels[3] // factor, bilinear)
+        self.up4 = Up(channels[3], channels[4], bilinear)
+        self.outc = OutConv(channels[4], 1)
+
+    def forward(self, f_maps, x5):
+        """
+        f_maps: [x4, x3, x2, x1]
+        """
+        x = self.up1(x5, f_maps[0])
+        x = self.up2(x, f_maps[1])
+        x = self.up3(x, f_maps[2])
+        x = self.up4(x, f_maps[3])
+
+        return torch.abs(self.outc(x))
 
 class OutConv(nn.Module):
     def __init__(self, in_channels, out_channels):

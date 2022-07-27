@@ -25,6 +25,13 @@ class UNet(nn.Module):
         self.up4 = Up(128, 64, bilinear)
         self.outc = OutConv(64, 4)
 
+    def decoder(self):
+        up1 = Up(1024, 512 // factor, bilinear)
+        up2 = Up(512, 256 // factor, bilinear)
+        up3 = Up(256, 128 // factor, bilinear)
+        up4 = Up(128, 64, bilinear)
+        return nn.Sequential(up1, up2, up3, up4)
+
     def forward(self, x):
         x1 = self.inc(x)
         x2 = self.down1(x1)
@@ -48,11 +55,11 @@ class UNet(nn.Module):
             d_1, d_2 = d_2, d_1
             f = 1 - f 
 
-        #d_1 = self.sigmoid_cons(d_1, 2, 2.4)
-        #d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
-        #f = self.sigmoid_cons(f, 0.5, 0.9)
+        d_1 = self.sigmoid_cons(d_1, 2, 2.4)
+        d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
+        f = self.sigmoid_cons(f, 0.5, 1.0)
 
-        v = f*torch.exp(-self.b_values*d_1) + (1-f)*torch.exp(-self.b_values*d_2)
+        v = f*torch.exp(-self.b_values*d_1*1e-3) + (1-f)*torch.exp(-self.b_values*d_2*1e-3)
 
         # add the rice-bias
         if self.rice:
@@ -71,3 +78,4 @@ class UNet(nn.Module):
         constrain the output physilogical parameters into a certain domain
         """
         return dmin+torch.sigmoid(param)*(dmax-dmin)
+

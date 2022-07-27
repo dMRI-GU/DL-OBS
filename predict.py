@@ -1,4 +1,6 @@
 from model.unet_model import UNet
+from model.unet_MultiDecoder import UNet_MultiDecoders
+from torch.utils.data import DataLoader, random_split
 from utils import load_data
 from pathlib import Path
 import os
@@ -46,32 +48,38 @@ if __name__ == '__main__':
     load = load_data(test_dir)
 
     testX = load.image_data('M', normalize=True)
+    testb0 = load.image_b0()
     'swap the dimension'
     testX = testX.transpose(1, 0, 2, 3)
     testX = load.crop_image(testX)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    test = torch.from_numpy(testX)
-    test_images = test.to(device=device, dtype=torch.float32)
+    testX = torch.from_numpy(testX)
+    test_images = testX.to(device=device, dtype=torch.float32)
+    test = torch.utils.data.TensorDataset(test_images)
+
+    test_loader = DataLoader(test, batch_size=1, shuffle=False, num_workers=8)
 
     b = torch.linspace(0, 3000, steps=21, device=device)
     b = b[1:]
 
-    net = UNet(n_channels=test.shape[1], b_values=b, rice=True, bilinear=False)
+    net = UNet_MultiDecoders(n_channels=test.shape[1], b=b, rice=True, bilinear=False)
     net.load_state_dict(torch.load(args.load, map_location=device))
 
     net.to(device=device)
-    
-    M, d_1, d_2, f, sigma = net(test_images)
-    
+
+    total_loss = 0
     with torch.no_grad():
-        mse = torch.nn.MSELoss()
-        loss = mse(M, test_images)
-        print(loss.item())
+        for X in test_loader:
+            mse = torch.nn.MSELoss()
+            M, d_1, d_2, f, sigma = net(X)
+            loss = mse(M, test_images)
+            total_loss += loss.item()
+        print(total_loss / len(test_loader))
 
     M, d_1, d_2, f, sigma = to_numpy(M, d_1, d_2, f, sigma)
 
     results = {'M.npy': M, 'd1.npy': d_1, 
-                'd2.npy': d_2, 'f.npy': f, 'sigma_g.npy': sigma}
-   # save_params(results)
+                'd2.npy': d_2, 'f.npy': f, 'sigma_g.npy': sigma, 'b0': testb0}
+    save_params(results)
