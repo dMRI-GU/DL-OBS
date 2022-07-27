@@ -5,6 +5,7 @@ import os
 from scipy import special
 import numpy as np
 import torch.nn as nn
+import torchvision
 
 def init_weights(m):
     if type(m) == nn.Linear:
@@ -98,6 +99,12 @@ class load_data():
         """
         return images[:, :, 20:-20, :]
 
+    def transform(self, image_data):
+        """apply the independent random rotation to image_data (20, 200, 240)"""
+        aug = torchvision.transforms.Compose([torchvision.transforms.ToTensor(), 
+                        torchvision.transforms.RandomRotation((-30, 30))])
+        trans = [aug(image_data[:, :, i]) for i in range(image_data.shape[2])]
+        return torch.cat(trans, axis=0)
 
 class post_processing():
     """
@@ -135,9 +142,12 @@ class patientDataset(Dataset):
     '''
     wrap the patient numpy data to be dealt by the dataloader
     '''
-    def __init__(self, data):
+    def __init__(self, data, transform):
         super(Dataset).__init__()
-        self.data = torch.from_numpy(data) 
+        self.data = data
+        if not torch.is_tensor(data):
+            self.data = torch.from_numpy(data)
+        self.trasnfor = transform
     
     def __len__(self):
         return self.data.shape[0] 

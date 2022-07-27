@@ -1,12 +1,13 @@
 from tqdm import tqdm
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
+from yaml import compose
 from utils import load_data, post_processing, patientDataset, init_weights
 from model.unet_model import UNet
 from model.unet_MultiDecoder import UNet_MultiDecoders
 from pathlib import Path
 import logging
-import numpy as np
+import torchvision
 import wandb
 import argparse
 import torch
@@ -21,6 +22,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     n_train = len(dataset) - n_val
     train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
+    train_augs = torchvision.transforms.Compose([
+     torchvision.transforms.RandomCrop(),
+     torchvision.transforms.ToTensor()])
 
     
     loader_args = dict(batch_size=batch_size, num_workers=4, pin_memory=True)
@@ -141,12 +145,21 @@ if __name__ == '__main__':
 
     '[num_slices, num_diff_dir, H, W]'
     data = load.image_data(args.dir, normalize=True)
-    'swap the dimension of'
-    data = data.transpose(1, 0, 2, 3)
+    
     data = load.crop_image(data)
+    data = data.transpose(1, 2, 3, 0)
+    # numpy - (num_slices, h, w, 20)
+    print(data.shape)
 
     num_slices = data.shape[0] 
+    
+    # list of rotated images
+    data_rots = [load.transform(data[i]) for i in range(num_slices)]
+    # torch (num_slices, 20, h, 2)
+    data_rots =  torch.stack(tuple(data_rots), axis=0)
 
+    raw_data = data.transpose(0, 3, 1, 2)
+    data = torch.cat([torch.from_numpy(raw_data), data_rots], axis=0)
     patientData = patientDataset(data)
 
     logging.info(f'TRAING DATA SIZE: {data.shape}')
