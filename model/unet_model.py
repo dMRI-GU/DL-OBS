@@ -1,6 +1,6 @@
 """ Full assembly of the parts to form the complete network """
-
 from model.unet_parts import *
+from model.utils import *
 from cmath import sqrt
 
 
@@ -8,7 +8,7 @@ class UNet(nn.Module):
     def __init__(self, n_channels, b, rice = True, bilinear=False):
         super(UNet, self).__init__()
         self.n_channels = n_channels
-        self.n_classes = 4
+        self.n_classes = 3
         self.b_values = b.reshape(1, len(b), 1, 1)
         self.bilinear = bilinear
         self.rice = rice
@@ -23,14 +23,7 @@ class UNet(nn.Module):
         self.up2 = Up(512, 256 // factor, bilinear)
         self.up3 = Up(256, 128 // factor, bilinear)
         self.up4 = Up(128, 64, bilinear)
-        self.outc = OutConv(64, 4)
-
-    def decoder(self):
-        up1 = Up(1024, 512 // factor, bilinear)
-        up2 = Up(512, 256 // factor, bilinear)
-        up3 = Up(256, 128 // factor, bilinear)
-        up4 = Up(128, 64, bilinear)
-        return nn.Sequential(up1, up2, up3, up4)
+        self.outc = OutConv(64, 3)
 
     def forward(self, x):
         x1 = self.inc(x)
@@ -44,34 +37,31 @@ class UNet(nn.Module):
         x = self.up4(x, x1)
         logits = torch.abs(self.outc(x))
 
-        d_1 = logits[:, 0:1, :, :]
-        d_2 = logits[:, 1:2, :, :]
-        f = logits[:, 2:3, :, :]
-        sigma = logits[:, 3:4, :, :]
+        d = logits[:, 0:1, :, :]
+        k = logits[:, 1:2, :, :]
+        #f = logits[:, 2:3, :, :]
+        sigma = logits[:, 2:3, :, :]
         sigma = torch.abs(sigma)
 
         # make sure D1 is the larger value between D1 and D2
-        if torch.mean(d_1) < torch.mean(d_2):
-            d_1, d_2 = d_2, d_1
-            f = 1 - f 
+        #if torch.mean(d_1) < torch.mean(d_2):
+        #    d_1, d_2 = d_2, d_1
+        #    f = 1 - f 
 
-        d_1 = self.sigmoid_cons(d_1, 2, 2.4)
-        d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
-        f = self.sigmoid_cons(f, 0.5, 1.0)
+        d = self.sigmoid_cons(d, 0., 5.)
+        k = self.sigmoid_cons(k, 0., 2.)
+        #f = self.sigmoid_cons(f, 0.5, 1.0)
 
-        v = f*torch.exp(-self.b_values*d_1*1e-3) + (1-f)*torch.exp(-self.b_values*d_2*1e-3)
+        #v = bio_exp(d_1, d_2, f, self.b_values)
+        v = kurtosis(self.b_values, d, k)
 
         # add the rice-bias
         if self.rice:
-            t = v / sigma
-            res= sigma*(sqrt(torch.pi/8)*
-                            ((2+t**2)*torch.special.i0e(t**2/4)+
-                            t**2*torch.special.i1e(t**2/4)))
-            res = res.to(torch.float32)
+            res = rice_exp(v, sigma)
         else:
             res = v
 
-        return res, d_1, d_2, f, sigma
+        return res, d, k, sigma
 
     def sigmoid_cons(self, param, dmin, dmax):
         """

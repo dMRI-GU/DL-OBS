@@ -63,7 +63,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
                 images = images.to(device=device, dtype=torch.float32)
 
-                M, d_1, d_2, f, sigma = net(images)
+                M, d, k, sigma = net(images)
                 loss =  criterion(M, images)
 
                 optimizer.zero_grad(set_to_none=True)
@@ -89,7 +89,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                             histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
                             histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
                         """
-                        val_loss, params, M, img = post_process.evaluate(val_loader, b, net, device, global_step)
+                        val_loss, params, M, img = post_process.evaluate(val_loader, net, device)
                         scheduler.step(val_loss)
                         
                         logging.info('Validation Loss: {}'.format(val_loss))
@@ -101,9 +101,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                                         'Min M': M.cpu().min(),
                                         'max Image': img.cpu().max(),
                                         'min Image': img.cpu().min(),
-                                        'd1': wandb.Image(params['d_1'][0].cpu()),
-                                        'd2': wandb.Image(params['d_2'][0].cpu()),
-                                        'f': wandb.Image(params['f'][0].cpu()),
+                                        'd': wandb.Image(params['d'][0].cpu()),
+                                        'k': wandb.Image(params['k'][0].cpu()),
                                         'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
                                         'M': wandb.Image(M.cpu()),
                                         'image': wandb.Image(img.cpu()),
@@ -114,7 +113,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
-            torch.save( net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
+            torch.save(net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
 
 def get_args():

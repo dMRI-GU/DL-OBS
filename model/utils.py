@@ -24,3 +24,10 @@ def bio_exp(d1, d2, f, b):
     v = f*torch.exp(-b*d1*1e-3) + (1-f)*torch.exp(-b*d2*1e-3)
 
     return v
+
+def kurtosis(bval, D, K):
+    """
+    torch kurtosis function
+    """
+    X = torch.exp(-bval*D*1e-3+(bval*D*1e-3)**2*K/6)
+    return X

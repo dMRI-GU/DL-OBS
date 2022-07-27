@@ -114,7 +114,7 @@ class post_processing():
 
         super().__init__()
     
-    def evaluate(self, val_loader, b, net, device, step):
+    def evaluate(self, val_loader, net, device):
         """
         evlaute the performance of network 
         """
@@ -129,8 +129,8 @@ class post_processing():
                 images = batch
 
                 images = images.to(device=device, dtype=torch.float32)
-                M, d_1, d_2, f, sigma_g = net(images)
-                params_val = {'d_1':d_1, 'd_2':d_2, 'f':f, 'sigma_g':sigma_g}
+                M, d, k, sigma_g = net(images)
+                params_val = {'d':d, 'k':k, 'sigma_g':sigma_g}
 
                 mse_loss = loss(M, images).item() 
                 loss_value = torch.tensor(mse_loss)
