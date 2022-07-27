@@ -119,7 +119,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=7, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
@@ -148,13 +148,13 @@ if __name__ == '__main__':
     num_slices = data.shape[0] 
     
     # list of rotated images
-    data_rots = [load.transform(data[i]) for i in range(num_slices)]
+    #data_rots = [load.transform(data[i]) for i in range(num_slices)]
     # torch (num_slices, 20, h, 2)
-    data_rots =  torch.stack(tuple(data_rots), axis=0)
+    #data_rots =  torch.stack(tuple(data_rots), axis=0)
 
     raw_data = data.transpose(0, 3, 1, 2)
-    data = torch.cat([torch.from_numpy(raw_data), data_rots], axis=0)
-    patientData = patientDataset(data)
+    #data = torch.cat([torch.from_numpy(raw_data), data_rots], axis=0)
+    patientData = patientDataset(raw_data)
 
     logging.info(f'TRAING DATA SIZE: {data.shape}')
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
