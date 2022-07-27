@@ -111,7 +111,7 @@ class post_processing():
         """
         evlaute the performance of network 
         """
-        loss = torch.nn.L1Loss()
+        loss = torch.nn.MSELoss()
         net.eval()
         val_losses = 0
 

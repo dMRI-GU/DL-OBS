@@ -21,6 +21,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     n_train = len(dataset) - n_val
     train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
+
+    
     loader_args = dict(batch_size=batch_size, num_workers=4, pin_memory=True)
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
@@ -42,7 +44,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     optimizer = optim.SGD(net.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=1)
     
-    criterion = nn.L1Loss()
+    criterion = nn.MSELoss()
     global_step = 0
 
     post_process= post_processing()
