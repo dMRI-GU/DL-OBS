@@ -63,7 +63,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
                 images = images.to(device=device, dtype=torch.float32)
 
-                M, d, k, sigma = net(images)
+                M, _, _, _, _ = net(images)
                 loss =  criterion(M, images)
 
                 optimizer.zero_grad(set_to_none=True)

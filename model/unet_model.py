@@ -8,7 +8,7 @@ class UNet(nn.Module):
     def __init__(self, n_channels, b, rice = True, bilinear=False):
         super(UNet, self).__init__()
         self.n_channels = n_channels
-        self.n_classes = 3
+        self.n_classes = 4
         self.b_values = b.reshape(1, len(b), 1, 1)
         self.bilinear = bilinear
         self.rice = rice
@@ -23,7 +23,7 @@ class UNet(nn.Module):
         self.up2 = Up(512, 256 // factor, bilinear)
         self.up3 = Up(256, 128 // factor, bilinear)
         self.up4 = Up(128, 64, bilinear)
-        self.outc = OutConv(64, 3)
+        self.outc = OutConv(64, 4)
 
     def forward(self, x):
         x1 = self.inc(x)
@@ -37,23 +37,23 @@ class UNet(nn.Module):
         x = self.up4(x, x1)
         logits = torch.abs(self.outc(x))
 
-        d = logits[:, 0:1, :, :]
-        k = logits[:, 1:2, :, :]
-        #f = logits[:, 2:3, :, :]
-        sigma = logits[:, 2:3, :, :]
+        d_1 = logits[:, 0:1, :, :]
+        d_2 = logits[:, 1:2, :, :]
+        f = logits[:, 2:3, :, :]
+        sigma = logits[:, 3:4, :, :]
         sigma = torch.abs(sigma)
 
         # make sure D1 is the larger value between D1 and D2
-        #if torch.mean(d_1) < torch.mean(d_2):
-        #    d_1, d_2 = d_2, d_1
-        #    f = 1 - f 
+        if torch.mean(d_1) < torch.mean(d_2):
+            d_1, d_2 = d_2, d_1
+            f = 1 - f 
 
-        d = self.sigmoid_cons(d, 0., 5.)
-        k = self.sigmoid_cons(k, 0., 2.)
-        #f = self.sigmoid_cons(f, 0.5, 1.0)
+        d_1 = self.sigmoid_cons(d_1, 2., 2.4)
+        d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
+        f = self.sigmoid_cons(f, 0.5, 1.0)
 
         #v = bio_exp(d_1, d_2, f, self.b_values)
-        v = kurtosis(self.b_values, d, k)
+        v = bio_exp(d_1, d_2, f, self.b_values)
 
         # add the rice-bias
         if self.rice:
@@ -61,7 +61,7 @@ class UNet(nn.Module):
         else:
             res = v
 
-        return res, d, k, sigma
+        return res, d_1, d_2, f, sigma
 
     def sigmoid_cons(self, param, dmin, dmax):
         """

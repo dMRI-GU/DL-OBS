@@ -129,8 +129,8 @@ class post_processing():
                 images = batch
 
                 images = images.to(device=device, dtype=torch.float32)
-                M, d, k, sigma_g = net(images)
-                params_val = {'d':d, 'k':k, 'sigma_g':sigma_g}
+                M, d1, d2, f, sigma_g = net(images)
+                params_val = {'d1':d1, 'd2': d2, 'f': f, 'sigma_g':sigma_g}
 
                 mse_loss = loss(M, images).item() 
                 loss_value = torch.tensor(mse_loss)
