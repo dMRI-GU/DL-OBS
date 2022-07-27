@@ -22,11 +22,6 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     n_train = len(dataset) - n_val
     train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
-    train_augs = torchvision.transforms.Compose([
-     torchvision.transforms.RandomCrop(),
-     torchvision.transforms.ToTensor()])
-
-    
     loader_args = dict(batch_size=batch_size, num_workers=4, pin_memory=True)
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
@@ -125,7 +120,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=7, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
@@ -171,7 +166,7 @@ if __name__ == '__main__':
     b = b[1:]
     
     'n_channel - 20 b values'
-    net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
+    net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
 
     logging.info(f'Network:\n'
                  f'\t{net.n_channels} input channels\n'

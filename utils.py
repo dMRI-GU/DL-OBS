@@ -142,12 +142,11 @@ class patientDataset(Dataset):
     '''
     wrap the patient numpy data to be dealt by the dataloader
     '''
-    def __init__(self, data, transform):
+    def __init__(self, data):
         super(Dataset).__init__()
         self.data = data
         if not torch.is_tensor(data):
             self.data = torch.from_numpy(data)
-        self.trasnfor = transform
     
     def __len__(self):
         return self.data.shape[0] 

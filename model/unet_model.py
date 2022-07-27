@@ -5,11 +5,11 @@ from cmath import sqrt
 
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, b_values, rice = True, bilinear=False):
+    def __init__(self, n_channels, b, rice = True, bilinear=False):
         super(UNet, self).__init__()
         self.n_channels = n_channels
         self.n_classes = 4
-        self.b_values = b_values.reshape(1, len(b_values), 1, 1)
+        self.b_values = b.reshape(1, len(b), 1, 1)
         self.bilinear = bilinear
         self.rice = rice
 
