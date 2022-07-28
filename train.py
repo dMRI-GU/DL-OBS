@@ -2,7 +2,7 @@ from tqdm import tqdm
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
 from yaml import compose
-from utils import load_data, post_processing, patientDataset, init_weights
+from utils import pre_data, post_processing, patientDataset, init_weights
 from model.unet_model import UNet
 from model.unet_MultiDecoder import UNet_MultiDecoders
 from pathlib import Path
@@ -78,36 +78,23 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                     'epoch': epoch
                 })
 
-                # Evaluation round
-                division_step = (n_train // (10 * batch_size))
-                if division_step > 0:
-                    if global_step % division_step == 0:
-                        """
-                        histograms = {}
-                        for tag, value in net.named_parameters():
-                            tag = tag.replace('/', '.')
-                            histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
-                            histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
-                        """
-                        val_loss, params, M, img = post_process.evaluate(val_loader, net, device)
-                        scheduler.step(val_loss)
+        # Evaluate the validation loss after each epoch            
+        val_loss, params, M, img = post_process.evaluate(val_loader, net, device)
+        scheduler.step(val_loss)
                         
-                        logging.info('Validation Loss: {}'.format(val_loss))
-                        
-                        experiment.log({
-                                        'learning rate': optimizer.param_groups[0]['lr'],
-                                        'validation Loss': val_loss,
-                                        'Max M': M.cpu().max(),
-                                        'Min M': M.cpu().min(),
-                                        'max Image': img.cpu().max(),
-                                        'min Image': img.cpu().min(),
-                                        'd1': wandb.Image(params['d1'][0].cpu()),
-                                        'd2': wandb.Image(params['d2'][0].cpu()),
-                                        'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
-                                        'M': wandb.Image(M.cpu()),
-                                        'image': wandb.Image(img.cpu()),
-                                        'step': global_step,
-                                        'epoch': epoch,
+        logging.info('Validation Loss: {}'.format(val_loss))          
+        experiment.log({'learning rate': optimizer.param_groups[0]['lr'],
+                        'validation Loss': val_loss,
+                        'Max M': M.cpu().max(),
+                        'Min M': M.cpu().min(),
+                        'max Image': img.cpu().max(),
+                        'min Image': img.cpu().min(),
+                        'd1': wandb.Image(params['d1'][0].cpu()),
+                        'd2': wandb.Image(params['d2'][0].cpu()),
+                        'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
+                        'M': wandb.Image(M.cpu()),
+                        'image': wandb.Image(img.cpu()),
+                        'epoch': epoch,
                                         #**histograms
                         })
 
@@ -135,28 +122,17 @@ if __name__ == '__main__':
     args = get_args()
 
     data_dir = 'save_npy'
-    load = load_data(data_dir)
+    load = pre_data(data_dir)
 
     '[num_slices, num_diff_dir, H, W]'
-    data = load.image_data(args.dir, normalize=True)
+    raw_data = load.image_data(args.dir, normalize=True)
+    print(raw_data.shape)
+    # torch - (num_slices, 20, h, w)
+    num_slices = raw_data.shape[0] 
     
-    data = load.crop_image(data)
-    data = data.transpose(1, 2, 3, 0)
-    # numpy - (num_slices, h, w, 20)
-    print(data.shape)
-
-    num_slices = data.shape[0] 
-    
-    # list of rotated images
-    #data_rots = [load.transform(data[i]) for i in range(num_slices)]
-    # torch (num_slices, 20, h, 2)
-    #data_rots =  torch.stack(tuple(data_rots), axis=0)
-
-    raw_data = data.transpose(0, 3, 1, 2)
-    #data = torch.cat([torch.from_numpy(raw_data), data_rots], axis=0)
     patientData = patientDataset(raw_data)
 
-    logging.info(f'TRAING DATA SIZE: {data.shape}')
+    logging.info(f'TRAING DATA SIZE: {raw_data.shape}')
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')

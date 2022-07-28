@@ -11,7 +11,7 @@ def init_weights(m):
     if type(m) == nn.Linear:
         torch.nn.init.xavier_uniform(m.weight)
 
-class load_data():
+class pre_data():
     """
     This class load the data from the pointed directory
     """
@@ -54,11 +54,13 @@ class load_data():
 
         return names
 
-    def image_data(self, dir = 'M', normalize=True):
+    def image_data(self, dir = 'M', normalize=True, crop=True, transform=False):
         """
         get the image data of the corresponding diffusion direction 
         (slices as batch size) 
         diffusion direction: I, S, M, P 
+        return:
+        images - (num_slices, 20, h, w) 20 is the number of diffusion direction
         """
         data_list = []        
 
@@ -82,7 +84,20 @@ class load_data():
             'Stack the image data regardless of the differences in the slices'
             data_list.append(image_dir)
 
-        return np.concatenate(tuple(data_list), axis=1)
+        imgs = np.concatenate(tuple(data_list), axis=1)
+        # imgs (num_slices, 20, h, w) 20
+        imgs = imgs.transpose(1, 0, 2, 3)
+        imgs = torch.from_numpy(imgs)
+        print(imgs.shape)
+        if crop:
+            imgs = self.crop_image(imgs)
+
+        if transform:
+            rot_imgs = [self.transform(imgs[i]) for i in range(imgs.shape[0])]
+            rot_imgs = torch.stack(tuple(rot_imgs), axis=0)
+            imgs = torch.cat([imgs, rot_imgs], axis=0)
+
+        return imgs
     
     def image_b0(self):
         """
@@ -91,7 +106,7 @@ class load_data():
         b0s = [pat['image_b0'] for pat in self.pat_data.values()]
      
         "b0 for normalization"
-        return [ np.where(b0 == 0, 1, b0) for b0 in b0s]
+        return [np.where(b0 == 0, 1, b0) for b0 in b0s]
 
     def crop_image(self, images):
         """
@@ -100,10 +115,10 @@ class load_data():
         return images[:, :, 20:-20, :]
 
     def transform(self, image_data):
-        """apply the independent random rotation to image_data (20, 200, 240)"""
-        aug = torchvision.transforms.Compose([torchvision.transforms.ToTensor(), 
+        """apply the independent random rotation to image_data (200, 240, 20)"""
+        aug = torchvision.transforms.Compose([ 
                         torchvision.transforms.RandomRotation((-30, 30))])
-        trans = [aug(image_data[:, :, i]) for i in range(image_data.shape[2])]
+        trans = [aug(image_data[i:i+1]) for i in range(image_data.shape[0])]
         return torch.cat(trans, axis=0)
 
 class post_processing():
