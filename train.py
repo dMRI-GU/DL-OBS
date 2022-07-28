@@ -40,7 +40,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
         Device:          {device.type}
     ''')
 
-    optimizer = optim.SGD(net.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(net.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=1)
     
     criterion = nn.MSELoss()
@@ -101,8 +101,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                                         'Min M': M.cpu().min(),
                                         'max Image': img.cpu().max(),
                                         'min Image': img.cpu().min(),
-                                        'd': wandb.Image(params['d'][0].cpu()),
-                                        'k': wandb.Image(params['k'][0].cpu()),
+                                        'd1': wandb.Image(params['d1'][0].cpu()),
+                                        'd2': wandb.Image(params['d2'][0].cpu()),
                                         'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
                                         'M': wandb.Image(M.cpu()),
                                         'image': wandb.Image(img.cpu()),
@@ -119,8 +119,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=7, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-4,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
