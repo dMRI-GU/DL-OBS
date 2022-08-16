@@ -5,6 +5,7 @@ from yaml import compose
 from utils import pre_data, post_processing, patientDataset, init_weights
 from model.unet_model import UNet
 from model.unet_MultiDecoder import UNet_MultiDecoders
+from model.attention_unet import Atten_Unet
 from pathlib import Path
 import logging
 import torchvision
@@ -41,7 +42,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     ''')
 
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=1)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
     
     criterion = nn.MSELoss()
     global_step = 0
@@ -51,11 +52,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     for epoch in range(1, epochs+1):
         net.train()
 
-        best = 1e6    
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images = batch
-
                 assert images.shape[1] == net.n_channels, \
                     f'Network has been defined with {net.n_channels} input channels, ' \
                     f'but loaded images have {images.shape[1]} channels. Please check that ' \
@@ -64,9 +63,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 images = images.to(device=device, dtype=torch.float32)
 
                 M, _, _, _, _ = net(images)
-                loss =  criterion(M, images)
+                loss =  criterion(M, images) + 1e-6
 
-                optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
@@ -77,27 +76,28 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                     'step': global_step,
                     'epoch': epoch
                 })
-
-        # Evaluate the validation loss after each epoch            
-        val_loss, params, M, img = post_process.evaluate(val_loader, net, device)
-        scheduler.step(val_loss)
+                
+            
+            with torch.no_grad():
+                val_loss, params, M, img = post_process.evaluate(val_loader, net, device)
+            scheduler.step(val_loss)
                         
-        logging.info('Validation Loss: {}'.format(val_loss))          
-        experiment.log({'learning rate': optimizer.param_groups[0]['lr'],
-                        'validation Loss': val_loss,
-                        'Max M': M.cpu().max(),
-                        'Min M': M.cpu().min(),
-                        'max Image': img.cpu().max(),
-                        'min Image': img.cpu().min(),
-                        'd1': wandb.Image(params['d1'][0].cpu()),
-                        'd2': wandb.Image(params['d2'][0].cpu()),
-                        'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
-                        'M': wandb.Image(M.cpu()),
-                        'image': wandb.Image(img.cpu()),
-                        'epoch': epoch,
-                                        #**histograms
-                        })
-
+            logging.info('Validation Loss: {}'.format(val_loss))
+            experiment.log({'learning rate': optimizer.param_groups[0]['lr'],
+                            'validation Loss': val_loss,
+                            'Max M': M.cpu().max(),
+                            'Min M': M.cpu().min(),
+                            'max Image': img.cpu().max(),
+                            'min Image': img.cpu().min(),
+                            'd1': wandb.Image(params['d1'][0].cpu()),
+                            'd2': wandb.Image(params['d2'][0].cpu()),
+                            'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
+                            'M': wandb.Image(M.cpu()),
+                            'image': wandb.Image(img.cpu()),
+                            'epoch': epoch,
+                            })
+        
+        # save the model for the current epoch
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             torch.save(net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
@@ -105,9 +105,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=7, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=2, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-4,
+    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=30, help='Number of epochs')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-2,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
@@ -122,17 +122,8 @@ if __name__ == '__main__':
     args = get_args()
 
     data_dir = 'save_npy'
-    load = pre_data(data_dir)
+    patientData = patientDataset(data_dir, transform=False)
 
-    '[num_slices, num_diff_dir, H, W]'
-    raw_data = load.image_data(args.dir, normalize=True)
-    print(raw_data.shape)
-    # torch - (num_slices, 20, h, w)
-    num_slices = raw_data.shape[0] 
-    
-    patientData = patientDataset(raw_data)
-
-    logging.info(f'TRAING DATA SIZE: {raw_data.shape}')
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
@@ -140,12 +131,21 @@ if __name__ == '__main__':
     b = torch.linspace(0, 3000, steps=21, device=device)
     b = b[1:]
     
-    'n_channel - 20 b values'
-    net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
+    m_decoders = True 
+    #use the number of diffusion direction in your data
+    if m_decoders:
+        net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear, attention=False)
+        n_mess = "Unet-MultiDecoders"
+    else:
+        net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
+        n_mess = "Standard Unet"
+        
+    #n_mess = "atten_unet"
+    #net = Atten_Unet(n_channels=20, b=b, rice=True)
 
     logging.info(f'Network:\n'
+                 f'\t{n_mess}\n'
                  f'\t{net.n_channels} input channels\n'
-                 #f'\t{net.n_classes} output channels (classes)\n'
                  f'\t{"Bilinear" if net.bilinear else "Transposed conv"} upscaling')
 
     if args.load:
@@ -154,7 +154,6 @@ if __name__ == '__main__':
 
     net.to(device=device)
     net.apply(init_weights)
-
     try:
         train_net(dataset=patientData,
                   net=net,

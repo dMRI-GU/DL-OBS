@@ -1,7 +1,8 @@
 from model.unet_model import UNet
+from model.attention_unet import Atten_Unet 
 from model.unet_MultiDecoder import UNet_MultiDecoders
 from torch.utils.data import DataLoader, random_split
-from utils import load_data
+from utils import pre_data, patientDataset
 from pathlib import Path
 import os
 import numpy as np
@@ -12,7 +13,7 @@ result_path = Path('./results/')
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--load', '-f', type=str, default='checkpoints/checkpoint_epoch3.pth',
+    parser.add_argument('--load', '-f', type=str, default='checkpoints/checkpoint_epoch24.pth',
                         help='Load the model to test the result')
 
     return parser.parse_args()
@@ -42,44 +43,43 @@ if __name__ == '__main__':
     saves the result in ./results/
     """
 
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
     args = get_args()
 
     test_dir = 'test'
-    load = load_data(test_dir)
-
-    testX = load.image_data('M', normalize=True)
-    testb0 = load.image_b0()
-    'swap the dimension'
-    testX = testX.transpose(1, 0, 2, 3)
-    testX = load.crop_image(testX)
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    testX = torch.from_numpy(testX)
-    test_images = testX.to(device=device, dtype=torch.float32)
-    test = torch.utils.data.TensorDataset(test_images)
+    # Load the dataset
+    test = patientDataset(test_dir)
+    pre = pre_data(test_dir)
+    test_loader = DataLoader(test, batch_size=22, shuffle=False, num_workers=4)
+    test_b0 = pre.image_b0()
 
-    test_loader = DataLoader(test, batch_size=1, shuffle=False, num_workers=8)
-
+    # Initialize the b values [150, 300, 450, ..., 3000]
     b = torch.linspace(0, 3000, steps=21, device=device)
     b = b[1:]
-
-    net = UNet_MultiDecoders(n_channels=test.shape[1], b=b, rice=True, bilinear=False)
+    
+    # Load the model
+    net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=False, attention=False)
     net.load_state_dict(torch.load(args.load, map_location=device))
-
     net.to(device=device)
 
     total_loss = 0
+    net.eval()
     with torch.no_grad():
         for X in test_loader:
+            images = X.to(device=device, dtype=torch.float32)
+            
             mse = torch.nn.MSELoss()
-            M, d_1, d_2, f, sigma = net(X)
-            loss = mse(M, test_images)
+            M, d_1, d_2, f, sigma = net(images)
+            loss = mse(M, images)
             total_loss += loss.item()
-        print(total_loss / len(test_loader))
+
+    print("Test Loss: {}".format(total_loss / len(test_loader)))
 
     M, d_1, d_2, f, sigma = to_numpy(M, d_1, d_2, f, sigma)
 
     results = {'M.npy': M, 'd1.npy': d_1, 
-                'd2.npy': d_2, 'f.npy': f, 'sigma_g.npy': sigma, 'b0': testb0}
+                'd2.npy': d_2, 'f.npy': f, 'sigma_g.npy': sigma, 'b0': test_b0[0]}
     save_params(results)

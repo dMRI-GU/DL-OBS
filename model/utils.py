@@ -20,8 +20,7 @@ def rice_exp(v, sigma):
 
 def bio_exp(d1, d2, f, b):
     """ivim model"""
-    
-    v = f*torch.exp(-b*d1*1e-3) + (1-f)*torch.exp(-b*d2*1e-3)
+    v = f*torch.exp(-b*d1*1e-3+1e-6) + (1-f)*torch.exp(-b*d2*1e-3+1e-6)
 
     return v
 
@@ -29,5 +28,5 @@ def kurtosis(bval, D, K):
     """
     torch kurtosis function
     """
-    X = torch.exp(-bval*D*1e-3+(bval*D*1e-3)**2*K/6)
+    X = torch.exp(-bval*D*1e-3+(bval*D*1e-3)**2*K/6+1e-6)
     return X

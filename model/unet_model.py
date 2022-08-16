@@ -1,4 +1,4 @@
-""" Full assembly of the parts to form the complete network """
+""" Full assembly of the arts to form the complete network """
 from model.unet_parts import *
 from model.utils import *
 from cmath import sqrt
@@ -47,9 +47,9 @@ class UNet(nn.Module):
             d_1, d_2 = d_2, d_1
             f = 1 - f 
         
-        d_1 = self.sigmoid_cons(d_1, 2., 2.4)
-        d_2 = self.sigmoid_cons(d_2, 0.1, 0.5)
-        f = self.sigmoid_cons(f, 0.5, 1.0)
+        d_1 = sigmoid_cons(d_1, 2., 2.4)
+        d_2 = sigmoid_cons(d_2, 0.1, 0.5)
+        f = sigmoid_cons(f, 0.5, 1.0)
 
         v = bio_exp(d_1, d_2, f, self.b_values)
 
@@ -61,9 +61,4 @@ class UNet(nn.Module):
 
         return res, d_1, d_2, f, sigma
 
-    def sigmoid_cons(self, param, dmin, dmax):
-        """
-        constrain the output physilogical parameters into a certain domain
-        """
-        return dmin+torch.sigmoid(param)*(dmax-dmin)
 

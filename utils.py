@@ -7,10 +7,6 @@ import numpy as np
 import torch.nn as nn
 import torchvision
 
-def init_weights(m):
-    if type(m) == nn.Linear:
-        torch.nn.init.xavier_uniform(m.weight)
-
 class pre_data():
     """
     This class load the data from the pointed directory
@@ -23,79 +19,64 @@ class pre_data():
         super().__init__()
         self.data_dir = data_dir
         self.names = self.pat_names()
-        self.pat_data = self.load()
     
-    def load(self):
+    def load(self, pat_path):
         """
-        Load the data from the data_dir
+        Load the data from the patient_path
         """
-        pat_names = os.listdir(self.data_dir)
-        pat_data = {}
-
-        for i, pat_d in enumerate(pat_names):
-
-            'patd is DDR1.npy last four chars are discarded'
-            name = pat_d[:-4]
-            data_path = os.path.join(self.data_dir, pat_d)
-            data = np.load(data_path, allow_pickle=True)[()]
-            pat_data[name] = data
+        data_path = os.path.join(self.data_dir, pat_path)
+        pat_data = np.load(data_path, allow_pickle=True)[()]
 
         return pat_data
     
     def pat_names(self):
         """
+        Save the patients' name in a list. e.g. ['pat1', 'pat2', ..., ...]
         """
-        pat_names = os.listdir(self.data_dir)
-        names = []
+        return [pat_d[:-4] for pat_d in os.listdir(self.data_dir)]
 
-        for pat_d in pat_names:
-            name = pat_d[:-4]
-            names.append(name)
-
-        return names
-
-    def image_data(self, dir = 'M', normalize=True, crop=True, transform=False):
+    def image_data(self, pat_path, sl_idx, dir = 'M', normalize=True, crop=True):
         """
-        get the image data of the corresponding diffusion direction 
-        (slices as batch size) 
-        diffusion direction: I, S, M, P 
+        Get the image data of the corresponding diffusion direction (slices as batch size) 
+        
+        INPUT:
+        pats_path
+        sl_idx
+        dir - string - diffusion direction: I, S, M, P 
+        normalize - boolean - if the image data is normalzied by its corresponding b0
+        crop - boolean - if cropping the irrelevant background
+
         return:
-        images - (num_slices, 20, h, w) 20 is the number of diffusion direction
+        images - torch array: (1, 20, h, w) 20 is the number of diffusion direction
         """
-        data_list = []        
+        
+        data = self.load(pat_path)
+        idx = sl_idx
+        image_data = data['image_data'][:, idx, :, :]
+        image_b0 = data['image_b0'][idx, :, :]
+        
+        if normalize:
+            image_b0[image_b0 == 0] = 1
+        else:
+            image_b0 = 1
+        
+        # (81, h, w)
+        image_data_normalized = image_data / image_b0 
+       
+        # diffusion direction (81, 22)
+        diff_dir = data['diff_dir_arr']
+        diff_dir = diff_dir[:, 0]
+        # mask_dir: (81,)
+        mask_dir = (diff_dir == dir)
 
-        for pat_name in self.names:
-            data = self.pat_data[pat_name]
-            image_data = data['image_data']
-            
-            image_b0 = data['image_b0']
-            if normalize:
-                image_b0[image_b0 == 0] = 1
-            else:
-                image_b0 = 1
+        #image_dir - (20, h, w)
+        image_dir = image_data_normalized[mask_dir]
 
-            image_data_normalized = image_data / image_b0 
-            
-            diff_dir = data['diff_dir_arr']
-            diff_dir = diff_dir[:, 0]
-            mask_dir = (diff_dir == dir)
-            image_dir = image_data_normalized[mask_dir]
+        # imgs (20, h, w) 
+        imgs = torch.from_numpy(image_dir)
 
-            'Stack the image data regardless of the differences in the slices'
-            data_list.append(image_dir)
-
-        imgs = np.concatenate(tuple(data_list), axis=1)
-        # imgs (num_slices, 20, h, w) 20
-        imgs = imgs.transpose(1, 0, 2, 3)
-        imgs = torch.from_numpy(imgs)
-        print(imgs.shape)
         if crop:
             imgs = self.crop_image(imgs)
-
-        if transform:
-            rot_imgs = [self.transform(imgs[i]) for i in range(imgs.shape[0])]
-            rot_imgs = torch.stack(tuple(rot_imgs), axis=0)
-            imgs = torch.cat([imgs, rot_imgs], axis=0)
 
         return imgs
     
@@ -103,30 +84,28 @@ class pre_data():
         """
         Get the b0 for all the patients
         """
-        b0s = [pat['image_b0'] for pat in self.pat_data.values()]
+        files = os.listdir(self.data_dir)
+        
+        if not isinstance(files, list):
+            files = [files]
+
+        data = [self.load(file) for file in files]
+        b0s = [pat_data['image_b0'] for pat_data in data]
      
         "b0 for normalization"
         return [np.where(b0 == 0, 1, b0) for b0 in b0s]
 
     def crop_image(self, images):
         """
-        (num_slices, 20, H, W)
+        (20, H, W)
         """
-        return images[:, :, 20:-20, :]
-
-    def transform(self, image_data):
-        """apply the independent random rotation to image_data (200, 240, 20)"""
-        aug = torchvision.transforms.Compose([ 
-                        torchvision.transforms.RandomRotation((-30, 30))])
-        trans = [aug(image_data[i:i+1]) for i in range(image_data.shape[0])]
-        return torch.cat(trans, axis=0)
+        return images[:, 20:-20, :]
 
 class post_processing():
     """
     This class include the post processing function to evaluate the trained model
     """
     def __init__(self):
-
         super().__init__()
     
     def evaluate(self, val_loader, net, device):
@@ -139,17 +118,16 @@ class post_processing():
 
         params_val = dict()
        
-        with torch.no_grad():
-            for batch in val_loader:
-                images = batch
+        for batch in val_loader:
+            images = batch
 
-                images = images.to(device=device, dtype=torch.float32)
-                M, d1, d2, f, sigma_g = net(images)
-                params_val = {'d1':d1, 'd2': d2, 'f': f, 'sigma_g':sigma_g}
+            images = images.to(device=device, dtype=torch.float32)
+            M, d1, d2, f, sigma_g = net(images)
+            params_val = {'d1':d1, 'd2': d2, 'f': f, 'sigma_g':sigma_g}
 
-                mse_loss = loss(M, images).item() 
-                loss_value = torch.tensor(mse_loss)
-                val_losses += loss_value
+            mse_loss = loss(M, images).item() 
+            loss_value = torch.tensor(mse_loss)
+            val_losses += loss_value
 
         return val_losses/len(val_loader), params_val, M[0, 0, :, :], images[0, 0, :, :]
 
@@ -157,19 +135,33 @@ class patientDataset(Dataset):
     '''
     wrap the patient numpy data to be dealt by the dataloader
     '''
-    def __init__(self, data):
+    def __init__(self, data_dir, transform=None):
         super(Dataset).__init__()
-        self.data = data
-        if not torch.is_tensor(data):
-            self.data = torch.from_numpy(data)
-    
+        self.data_dir = data_dir
+        self.transform = transform
+
+        # Must not incluse ToTensor()!
+        self.patients = os.listdir(data_dir)
+        self.pre = pre_data(data_dir)
+
     def __len__(self):
-        return self.data.shape[0] 
+        """each data file consist of 22 slices"""
+        return len(os.listdir(self.data_dir))*22
     
     def __getitem__(self, idx):
+        # each time read on sample
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        image = self.data[idx]
+        pats_indice = idx // 22 
+        slice_indice = idx % 22
 
-        return image
+        imgs = self.pre.image_data(self.patients[pats_indice], slice_indice)
         
+        if self.transform:
+            imgs = self.transform(imgs)
+
+        return imgs
+
+def init_weights(m):
+    if type(m) == nn.Conv2d:
+        torch.nn.init.xavier_normal_(m.weight)
