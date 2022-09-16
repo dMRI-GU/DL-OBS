@@ -107,12 +107,13 @@ def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=30, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-2,
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=8e-2,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
+    parser.add_argument('--patientData', '-dir', type=str, default='./save_npy', help='Enther the directory saving the patient data')
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
 
@@ -121,27 +122,26 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
 
-    data_dir = 'save_npy'
+    data_dir = args.patientData
     patientData = patientDataset(data_dir, transform=False)
 
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
-    b = torch.linspace(0, 3000, steps=21, device=device)
+    b = torch.linspace(0, 2000, steps=21, device=device)
     b = b[1:]
     
-    m_decoders = True 
-    #use the number of diffusion direction in your data
-    if m_decoders:
-        net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear, attention=False)
-        n_mess = "Unet-MultiDecoders"
-    else:
-        net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
-        n_mess = "Standard Unet"
+    #use the multi-decoders unet
+    #net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear, attention=False)
+    #n_mess = "Unet-MultiDecoders"
+
+    # use standard u-net
+    #net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
+    #n_mess = "Standard Unet"
         
-    #n_mess = "atten_unet"
-    #net = Atten_Unet(n_channels=20, b=b, rice=True)
+    n_mess = "atten_unet"
+    net = Atten_Unet(n_channels=20, b=b, rice=True)
 
     logging.info(f'Network:\n'
                  f'\t{n_mess}\n'
