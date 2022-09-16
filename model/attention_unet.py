@@ -75,13 +75,14 @@ class Atten_Unet(nn.Module):
             d_1, d_2 = d_2, d_1
             f = 1 - f 
         
-        d_1 = sigmoid_cons(d_1, 2., 2.4)
+        d_1 = sigmoid_cons(d_1, 2.0, 2.4)
         d_2 = sigmoid_cons(d_2, 0.1, 0.5)
         f = sigmoid_cons(f, 0.5, 1.0)
 
+        # get the expectation of the clean images
         v = bio_exp(d_1, d_2, f, self.b_values)
 
-        # add the rice-bias
+        # add the rician bias
         if self.rice:
             res = rice_exp(v, sigma)
         else:

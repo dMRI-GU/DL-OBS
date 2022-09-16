@@ -50,18 +50,17 @@ if __name__ == '__main__':
     test_dir = 'test'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Load the dataset
+    # Load the test dataset
     test = patientDataset(test_dir)
-    pre = pre_data(test_dir)
     test_loader = DataLoader(test, batch_size=22, shuffle=False, num_workers=4)
     test_b0 = pre.image_b0()
 
-    # Initialize the b values [150, 300, 450, ..., 3000]
-    b = torch.linspace(0, 3000, steps=21, device=device)
+    # Initialize the b values [100, 200, 300, ..., 2000]
+    b = torch.linspace(0, 2000, steps=21, device=device)
     b = b[1:]
     
-    # Load the model
-    net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=False, attention=False)
+    # Load the UNet model
+    net = UNet(n_channels=20, b=b, rice=True, bilinear=False)
     net.load_state_dict(torch.load(args.load, map_location=device))
     net.to(device=device)
 
@@ -82,4 +81,6 @@ if __name__ == '__main__':
 
     results = {'M.npy': M, 'd1.npy': d_1, 
                 'd2.npy': d_2, 'f.npy': f, 'sigma_g.npy': sigma, 'b0': test_b0[0]}
+    
+    # save the physical parameters and denoised images
     save_params(results)
