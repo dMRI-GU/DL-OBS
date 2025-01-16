@@ -79,6 +79,7 @@ class Atten_Unet(nn.Module):
         d_2 = sigmoid_cons(d_2, 0.1, 0.5)
         f = sigmoid_cons(f, 0.5, 1.0)
 
+        self.b_values = self.b_values.to(d_1.device)
         # get the expectation of the clean images
         v = bio_exp(d_1, d_2, f, self.b_values)
 

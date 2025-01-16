@@ -1,3 +1,4 @@
+import math
 from tqdm import tqdm
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
@@ -56,10 +57,17 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images = batch
-                assert images.shape[1] == net.n_channels, \
-                    f'Network has been defined with {net.n_channels} input channels, ' \
-                    f'but loaded images have {images.shape[1]} channels. Please check that ' \
-                    'the images are loaded correctly.'
+
+                if 'parallel' in str(type(net)):
+                    assert images.shape[1] == net.module.n_channels, \
+                        f'Network has been defined with {net.module.n_channels} input channels, ' \
+                        f'but loaded images have {images.shape[1]} channels. Please check that ' \
+                        'the images are loaded correctly.'
+                else:
+                    assert images.shape[1] == net.n_channels, \
+                        f'Network has been defined with {net.n_channels} input channels, ' \
+                        f'but loaded images have {images.shape[1]} channels. Please check that ' \
+                        'the images are loaded correctly.'
 
                 images = images.to(device=device, dtype=torch.float32)
 
@@ -122,6 +130,8 @@ def get_args():
     parser.add_argument('--patientData', '-dir', type=str, default='/m2_data/Mustafa_SHARE/save_npy', help='Enther the directory saving the patient data')
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
+    parser.add_argument('--parallel_training', '-parallel', action='store_true', help='Use argument for parallel training with multiple GPUs.')
+
 
     return parser.parse_args()
 
@@ -132,11 +142,12 @@ if __name__ == '__main__':
     patientData = patientDataset(data_dir, transform=False)
 
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
-    b = torch.linspace(0, 2000, steps=21, device=device)
+    b = torch.linspace(0, 2000, steps=21)
     b = b[1:]
+    n_channels = 20
     
     #use the multi-decoders unet
     #net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear, attention=False)
@@ -146,13 +157,25 @@ if __name__ == '__main__':
     #net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
     #n_mess = "Standard Unet"
         
-    n_mess = "atten_unet"
-    net = Atten_Unet(n_channels=20, b=b, rice=True)
 
-    logging.info(f'Network:\n'
-                 f'\t{n_mess}\n'
-                 f'\t{net.n_channels} input channels\n'
-                 f'\t{"Bilinear" if net.bilinear else "Transposed conv"} upscaling')
+    if torch.cuda.device_count() > 1 & args.parallel_training == True:
+        print("Using ", torch.cuda.device_count(), " GPUs!\n")
+        n_mess = "atten_unet"
+        net = Atten_Unet(n_channels=n_channels,b=b,rice=True)
+        # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
+        net = nn.DataParallel(net)
+
+        logging.info(f'Network:\n'
+                     f'\t{n_mess}\n'
+                     f'\t{net.module.n_channels} input channels\n'
+                     f'\t{"Bilinear" if net.module.bilinear else "Transposed conv"} upscaling')
+    else:
+        n_mess = "atten_unet"
+        net = Atten_Unet(n_channels=n_channels,b=b,rice=True)
+        logging.info(f'Network:\n'
+                     f'\t{n_mess}\n'
+                     f'\t{net.n_channels} input channels\n'
+                     f'\t{"Bilinear" if net.bilinear else "Transposed conv"} upscaling')
 
     if args.load:
         logging.info(f'Model loaded from {args.load}')

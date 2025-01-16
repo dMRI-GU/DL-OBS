@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import argparse
 import wandb
-
 result_path = Path('./results/')
 
 def get_args():
@@ -52,7 +51,7 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Load the test dataset
-    test = patientDataset(test_dir)
+    test = patientDataset(test_dir, normalize=False)
     test_loader = DataLoader(test, batch_size=22, shuffle=False, num_workers=4)
     test_b0 = test.pre.image_b0()
 

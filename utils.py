@@ -140,7 +140,7 @@ class patientDataset(Dataset):
     '''
     wrap the patient numpy data to be dealt by the dataloader
     '''
-    def __init__(self, data_dir, transform=None, num_slices=22):
+    def __init__(self, data_dir, transform=None, num_slices=22, normalize = True):
         super(Dataset).__init__()
         self.data_dir = data_dir
         self.transform = transform
@@ -149,6 +149,7 @@ class patientDataset(Dataset):
         # Must not include ToTensor()!
         self.patients = os.listdir(data_dir)
         self.pre = pre_data(data_dir)
+        self.normalize = normalize
 
     def __len__(self):
         """each data file consist of 22 slices"""
@@ -161,14 +162,14 @@ class patientDataset(Dataset):
         pats_indice = idx // self.num_slices
         slice_indice = idx % self.num_slices
 
-        imgs = self.pre.image_data(self.patients[pats_indice], slice_indice)
+        imgs = self.pre.image_data(self.patients[pats_indice], slice_indice, normalize=self.normalize)
         
         if self.transform:
             imgs = self.transform(imgs)
 
         return imgs
 
-def init_weights(m):
+def init_weights(model):
     for name, module in model.named_modules():
         # Apply He initialization to Conv2d layers with ReLU activations
         if isinstance(module, nn.Conv2d):
