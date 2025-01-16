@@ -13,7 +13,7 @@ import wandb
 import argparse
 import torch
 
-dir_checkpoint = Path('./checkpoints/')
+dir_checkpoint = Path('../checkpoints/')
 
 def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, 
                 val_percent: float=0.1, save_checkpoint: bool=True):
@@ -46,6 +46,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     
     criterion = nn.MSELoss()
     global_step = 0
+    wandb.watch(models=net, criterion=criterion, log="all", log_freq=10)
 
     post_process= post_processing()
 
@@ -68,6 +69,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                if math.isnan(loss.item()):
+                    print("Error: Loss is NaN")
 
                 pbar.update(images.shape[0])
                 global_step += 1
@@ -102,7 +105,10 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             torch.save(net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
-
+    
+    experiment.finish()
+    
+    
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=30, help='Number of epochs')
@@ -113,7 +119,7 @@ def get_args():
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--patientData', '-dir', type=str, default='./save_npy', help='Enther the directory saving the patient data')
+    parser.add_argument('--patientData', '-dir', type=str, default='/m2_data/Mustafa_SHARE/save_npy', help='Enther the directory saving the patient data')
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
 

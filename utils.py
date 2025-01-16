@@ -169,5 +169,19 @@ class patientDataset(Dataset):
         return imgs
 
 def init_weights(m):
-    if type(m) == nn.Conv2d:
-        torch.nn.init.xavier_normal_(m.weight)
+    for name, module in model.named_modules():
+        # Apply He initialization to Conv2d layers with ReLU activations
+        if isinstance(module, nn.Conv2d):
+            if 'att' in name:  # Attention layers
+                nn.init.xavier_uniform_(module.weight)  # Xavier initialization for Sigmoid layers
+            else:  # Conv2d layers using ReLU
+                nn.init.kaiming_uniform_(module.weight, nonlinearity='relu')
+
+        # Apply Xavier initialization to BatchNorm layers
+        elif isinstance(module, nn.BatchNorm2d):
+            nn.init.constant_(module.weight, 1)  # Set the weight of BatchNorm to 1
+            nn.init.constant_(module.bias, 0)  # Set the bias of BatchNorm to 0
+
+        # Apply Xavier initialization for Linear layers if any (you may not have any in your current structure)
+        elif isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)

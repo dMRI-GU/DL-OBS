@@ -8,12 +8,13 @@ import os
 import numpy as np
 import torch
 import argparse
+import wandb
 
 result_path = Path('./results/')
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--load', '-f', type=str, default='checkpoints/checkpoint_epoch24.pth',
+    parser.add_argument('--load', '-f', type=str, default='../checkpoints/checkpoint_epoch30.pth',
                         help='Load the model to test the result')
 
     return parser.parse_args()
@@ -47,40 +48,44 @@ if __name__ == '__main__':
 
     args = get_args()
 
-    test_dir = 'test'
+    test_dir = '../PredictFolder'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Load the test dataset
     test = patientDataset(test_dir)
     test_loader = DataLoader(test, batch_size=22, shuffle=False, num_workers=4)
-    test_b0 = pre.image_b0()
+    test_b0 = test.pre.image_b0()
 
     # Initialize the b values [100, 200, 300, ..., 2000]
     b = torch.linspace(0, 2000, steps=21, device=device)
     b = b[1:]
     
     # Load the UNet model
-    net = UNet(n_channels=20, b=b, rice=True, bilinear=False)
+    net = Atten_Unet(n_channels=20, b=b, rice=False, bilinear=False)
     net.load_state_dict(torch.load(args.load, map_location=device))
     net.to(device=device)
 
     total_loss = 0
     net.eval()
+    experiment = wandb.init(project="ResultFromTraining")
+
     with torch.no_grad():
-        for X in test_loader:
+        for i,X in enumerate(test_loader):
             images = X.to(device=device, dtype=torch.float32)
             
             mse = torch.nn.MSELoss()
             M, d_1, d_2, f, sigma = net(images)
             loss = mse(M, images)
             total_loss += loss.item()
+            experiment.log({'prediction': wandb.Image(M[0, 15, :, :], caption=f'patient {i}'),
+                            'image': wandb.Image(images[0, 15, :, :], caption=f'patient {i}')})
 
     print("Test Loss: {}".format(total_loss / len(test_loader)))
 
     M, d_1, d_2, f, sigma = to_numpy(M, d_1, d_2, f, sigma)
 
     results = {'M.npy': M, 'd1.npy': d_1, 
-                'd2.npy': d_2, 'f.npy': f, 'sigma_g.npy': sigma, 'b0': test_b0[0]}
+                'd2.npy': d_2, 'f.npy': f, 'sigma_g.npy': sigma, 'b0': test_b0[0], 'images.npy':images.detach().cpu().numpy()}
     
     # save the physical parameters and denoised images
     save_params(results)
