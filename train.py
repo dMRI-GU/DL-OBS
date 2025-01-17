@@ -17,7 +17,7 @@ import torch
 dir_checkpoint = Path('../checkpoints/')
 
 def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, 
-                val_percent: float=0.1, save_checkpoint: bool=True):
+                val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False):
     
     # split into training and validation set
     n_val = int(len(dataset) * val_percent)
@@ -28,9 +28,10 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
-    experiment = wandb.init(project='UNet-Denoise', resume='allow', anonymous='must')
-    experiment.config.update(dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-                                  val_percent=val_percent, save_checkpoint=save_checkpoint))
+    if not sweeping:
+        experiment = wandb.init(project='UNet-Denoise', resume='allow', anonymous='must')
+        experiment.config.update(dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
+                                      val_percent=val_percent, save_checkpoint=save_checkpoint))
 
     logging.info(f'''Starting training:
         Epochs:          {epochs}
@@ -53,10 +54,15 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
     for epoch in range(1, epochs+1):
         net.train()
+        avg_loss = 0
+        num_batches = len(train_loader)
 
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images = batch
+                if torch.isnan(images).sum()>0:
+                    print(f'Warning: One batch contained {torch.isnan(images).sum().item()} NaN values. This batch was skipped.')
+                    continue
 
                 if 'parallel' in str(type(net)):
                     assert images.shape[1] == net.module.n_channels, \
@@ -82,11 +88,19 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
                 pbar.update(images.shape[0])
                 global_step += 1
-                experiment.log({
+                if not sweeping:
+                    experiment.log({
                     'train loss': loss.item(),
                     'step': global_step,
                     'epoch': epoch
                 })
+                else:
+                    wandb.log({
+                        'train loss': loss.item(),
+                        'step': global_step,
+                        'epoch': epoch
+                    })
+                avg_loss += loss.item()
                 
             
             with torch.no_grad():
@@ -94,7 +108,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
             scheduler.step(val_loss)
                         
             logging.info('Validation Loss: {}'.format(val_loss))
-            experiment.log({'learning rate': optimizer.param_groups[0]['lr'],
+            if not sweeping:
+                experiment.log({'learning rate': optimizer.param_groups[0]['lr'],
                             'validation Loss': val_loss,
                             'Max M': M.cpu().max(),
                             'Min M': M.cpu().min(),
@@ -106,16 +121,27 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                             'M': wandb.Image(M.cpu()),
                             'image': wandb.Image(img.cpu()),
                             'epoch': epoch,
+                            'avg_loss':avg_loss/num_batches
                             })
-        
+            else:
+                wandb.log({'learning rate': optimizer.param_groups[0]['lr'],
+                                'validation Loss': val_loss,
+                                'Max M': M.cpu().max(),
+                                'Min M': M.cpu().min(),
+                                'max Image': img.cpu().max(),
+                                'min Image': img.cpu().min(),
+                                'epoch': epoch,
+                                'avg_loss': avg_loss / num_batches
+                                })
+
         # save the model for the current epoch
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             torch.save(net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
     
-    experiment.finish()
-    
+    if not sweeping: experiment.finish()
+    else: wandb.finish()
     
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
@@ -131,9 +157,35 @@ def get_args():
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
     parser.add_argument('--parallel_training', '-parallel', action='store_true', help='Use argument for parallel training with multiple GPUs.')
+    parser.add_argument('--sweep', '-sweep', action='store_true', help='Use this flag if you want to run hyper parameter tuning')
 
 
     return parser.parse_args()
+
+def sweep(config = None):
+
+    print('Doing Sweep')
+
+    with wandb.init(config=config):
+        # If called by wandb.agent, as below,
+        # this config will be set by Sweep Controller
+        config = wandb.config
+        wandb.run.name = str(f'Batch_size {config.batch_size} num_epochs {config.epochs} lr {config.learning_rate:.4f}')
+        try:
+            train_net(dataset=patientData,
+                      net=net,
+                      device=device,
+                      b = b,
+                      epochs=config.epochs,
+                      batch_size=config.batch_size,
+                      learning_rate=config.learning_rate,
+                      val_percent=args.val / 100,
+                      sweeping=True
+                      )
+        except KeyboardInterrupt:
+            torch.save(net.state_dict(), 'INTERRUPTED.pth')
+            logging.info('Saved interrupt')
+            raise
 
 if __name__ == '__main__':
     args = get_args()
@@ -141,6 +193,18 @@ if __name__ == '__main__':
     data_dir = args.patientData
     patientData = patientDataset(data_dir, transform=False)
 
+    sweep_config = {
+        "name": "sweepDenoiseMRI",
+        'method': 'grid',
+        'metric': {
+            'name': 'avg_loss',
+            'goal': 'minimize'},
+        'parameters': {
+            "learning_rate": {"values": [0.8, 0.08, 0.008]},
+            "batch_size": {"values": [2, 4, 8]},
+            "epochs": {"values": [1, 2]},
+        }
+    }
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
@@ -183,17 +247,23 @@ if __name__ == '__main__':
 
     net.to(device=device)
     net.apply(init_weights)
-    try:
-        train_net(dataset=patientData,
-                  net=net,
-                  device=device,
-                  b = b,
-                  epochs=args.epochs,
-                  batch_size=args.batch_size,
-                  learning_rate=args.lr,
-                  val_percent=args.val / 100,
-                  )
-    except KeyboardInterrupt:
-        torch.save(net.state_dict(), 'INTERRUPTED.pth')
-        logging.info('Saved interrupt')
-        raise
+
+    if args.sweep:
+        sweep_id = wandb.sweep(sweep_config, project="Sweep DenoiseMRI")
+        wandb.agent(sweep_id, function=sweep)
+    else:
+
+        try:
+            train_net(dataset=patientData,
+                      net=net,
+                      device=device,
+                      b = b,
+                      epochs=args.epochs,
+                      batch_size=args.batch_size,
+                      learning_rate=args.lr,
+                      val_percent=args.val / 100,
+                      )
+        except KeyboardInterrupt:
+            torch.save(net.state_dict(), 'INTERRUPTED.pth')
+            logging.info('Saved interrupt')
+            raise
