@@ -36,6 +36,8 @@ class Atten_Unet(nn.Module):
    
         self.outc = OutConv(64, self.n_classes)
 
+
+
     def forward(self, x):
        
         x1 = self.inc(x)
@@ -69,6 +71,7 @@ class Atten_Unet(nn.Module):
         d_2 = logits[:, 1:2, :, :]
         f = logits[:, 2:3, :, :]
         sigma = logits[:, 3:4, :, :]
+        sigma[sigma == 0.] = 1e-8
 
         # make sure D1 is the larger value between D1 and D2
         if torch.mean(d_1) < torch.mean(d_2):
@@ -88,6 +91,16 @@ class Atten_Unet(nn.Module):
             res = rice_exp(v, sigma)
         else:
             res = v
+
+        #if torch.isnan(res).any():
+        #    print(f"NaNs detected in RES")
+        #    path = '/m2_data/mustafa/FailTest/'
+        #    torch.save(v, f'{path}v.pt')
+        #    torch.save(sigma, f'{path}sigma.pt')
+        #    torch.save(d_1, f'{path}d1.pt')
+        #    torch.save(d_2, f'{path}d2.pt')
+        #    torch.save(f, f'{path}f.pt')
+        #    sys.exit()
 
         return res, d_1, d_2, f, sigma
     

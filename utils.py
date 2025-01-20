@@ -6,6 +6,7 @@ from scipy import special
 import numpy as np
 import torch.nn as nn
 import torchvision
+from torchvision import transforms
 
 class pre_data():
     """
@@ -77,13 +78,20 @@ class pre_data():
 
         #image_dir - (selected_num_diffusion_direction, h, w)
         image_dir = image_data_normalized[mask_dir] 
-        imgs = torch.from_numpy(image_dir)
-
+        #imgs = torch.from_numpy(image_dir)
+        imgs = torch.tensor(image_dir,dtype=torch.float32)
         # crop the redundant pixels
         if crop:
             imgs = self.crop_image(imgs)
+            image_b0 = image_b0[ 20:-20, :]
 
-        return imgs
+        ###means = imgs.view(imgs.shape[0], -1).mean(dim=1)
+        #maxs,_ = imgs.view(imgs.shape[0], -1).max(dim=1)
+        ###stds = imgs.view(imgs.shape[0], -1).std(dim=1)
+        #imgs = imgs/maxs.unsqueeze(1).unsqueeze(1)
+        #norm = transforms.Normalize(means, stds)
+        #out = norm(imgs)
+        return imgs,image_b0  #,means,stds
     
     def image_b0(self):
         """
@@ -122,8 +130,8 @@ class post_processing():
         val_losses = 0
 
         params_val = dict()
-       
-        for batch in val_loader:
+              #batch,_,_    
+        for batch,_ in val_loader:
             images = batch
 
             images = images.to(device=device, dtype=torch.float32)
@@ -162,12 +170,13 @@ class patientDataset(Dataset):
         pats_indice = idx // self.num_slices
         slice_indice = idx % self.num_slices
 
-        imgs = self.pre.image_data(self.patients[pats_indice], slice_indice, normalize=self.normalize)
+        #imgs,means,stds
+        imgs,b0_data = self.pre.image_data(self.patients[pats_indice], slice_indice, normalize=self.normalize)
         
         if self.transform:
             imgs = self.transform(imgs)
 
-        return imgs
+        return imgs,b0_data#,means,stds
 
 def init_weights(model):
     for name, module in model.named_modules():

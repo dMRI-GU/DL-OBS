@@ -7,14 +7,22 @@ from utils import pre_data, post_processing, patientDataset, init_weights
 from model.unet_model import UNet
 from model.unet_MultiDecoder import UNet_MultiDecoders
 from model.attention_unet import Atten_Unet
+from model.unet_model import UNet
 from pathlib import Path
 import logging
 import torchvision
 import wandb
 import argparse
 import torch
-
+from IPython import embed
+import numpy as np
 dir_checkpoint = Path('../checkpoints/')
+
+def check_gradients(model):
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            if torch.isnan(param.grad).any():
+                print(f"NaN detected in gradient of {name}")
 
 def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, 
                 val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False):
@@ -24,7 +32,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     n_train = len(dataset) - n_val
     train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
-    loader_args = dict(batch_size=batch_size, num_workers=4, pin_memory=True)
+    loader_args = dict(batch_size=batch_size, num_workers=6, pin_memory=True)
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
@@ -58,10 +66,11 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
         num_batches = len(train_loader)
 
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
-            for batch in train_loader:
+                   #(batch,_,_)
+            for i, (batch,_) in enumerate(train_loader):
                 images = batch
-                if torch.isnan(images).sum()>0:
-                    print(f'Warning: One batch contained {torch.isnan(images).sum().item()} NaN values. This batch was skipped.')
+                if torch.isnan(images).sum()>0 or torch.max(images)>1e10:
+                    print(f'-Warning: One batch {i} contained {torch.isnan(images).sum().item()} NaN values and {torch.max(images)} as maximum value.\n This batch was skipped.\n')
                     continue
 
                 if 'parallel' in str(type(net)):
@@ -78,13 +87,18 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 images = images.to(device=device, dtype=torch.float32)
 
                 M, _, _, _, _ = net(images)
-                loss =  criterion(M, images) + 1e-6
-
+                loss =  criterion(M, images)
+   
                 optimizer.zero_grad()
                 loss.backward()
+                #check_gradients(net)         
+                torch.nn.utils.clip_grad_value_(net.parameters(), clip_value=0.5)
+                # Clip gradients to a maximum value
+                          
                 optimizer.step()
-                if math.isnan(loss.item()):
-                    print("Error: Loss is NaN")
+                #if math.isnan(loss.item()):
+                #    print("Error: Loss is NaN")
+                #    continue
 
                 pbar.update(images.shape[0])
                 global_step += 1
@@ -101,6 +115,10 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                         'epoch': epoch
                     })
                 avg_loss += loss.item()
+                if epoch == epochs and i == num_batches-1:
+                    np.save('../MimagesTest/images_norm.npy',images.cpu().detach().numpy())
+                    np.save('../MimagesTest/M_norm.npy',M.cpu().detach().numpy())
+                    print('Saved M and images')
                 
             
             with torch.no_grad():
@@ -146,7 +164,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=30, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=12, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=8e-2,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
@@ -212,20 +230,21 @@ if __name__ == '__main__':
     b = torch.linspace(0, 2000, steps=21)
     b = b[1:]
     n_channels = 20
-    
-    #use the multi-decoders unet
-    #net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear, attention=False)
-    #n_mess = "Unet-MultiDecoders"
 
-    # use standard u-net
-    #net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
-    #n_mess = "Standard Unet"
         
 
     if torch.cuda.device_count() > 1 & args.parallel_training == True:
         print("Using ", torch.cuda.device_count(), " GPUs!\n")
-        n_mess = "atten_unet"
-        net = Atten_Unet(n_channels=n_channels,b=b,rice=True)
+        #n_mess = "atten_unet"
+        #net = Atten_Unet(n_channels=n_channels,b=b,rice=True)
+        # use the multi-decoders unet
+        # net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear, attention=False)
+        # n_mess = "Unet-MultiDecoders"
+
+        # use standard u-net
+        net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
+        n_mess = "Standard Unet"
+
         # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
         net = nn.DataParallel(net)
 
@@ -234,8 +253,15 @@ if __name__ == '__main__':
                      f'\t{net.module.n_channels} input channels\n'
                      f'\t{"Bilinear" if net.module.bilinear else "Transposed conv"} upscaling')
     else:
-        n_mess = "atten_unet"
-        net = Atten_Unet(n_channels=n_channels,b=b,rice=True)
+        #n_mess = "atten_unet"
+        #net = Atten_Unet(n_channels=n_channels,b=b,rice=True)
+        # use the multi-decoders unet
+        # net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear, attention=False)
+        # n_mess = "Unet-MultiDecoders"
+
+        # use standard u-net
+        net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
+        n_mess = "Standard Unet"
         logging.info(f'Network:\n'
                      f'\t{n_mess}\n'
                      f'\t{net.n_channels} input channels\n'

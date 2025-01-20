@@ -41,6 +41,8 @@ class UNet(nn.Module):
         d_2 = logits[:, 1:2, :, :]
         f = logits[:, 2:3, :, :]
         sigma = logits[:, 3:4, :, :]
+        sigma[sigma == 0.] = 1e-8
+
 
         # make sure D1 is the larger value between D1 and D2
         if torch.mean(d_1) < torch.mean(d_2):
@@ -51,6 +53,7 @@ class UNet(nn.Module):
         d_2 = sigmoid_cons(d_2, 0.1, 0.5)
         f = sigmoid_cons(f, 0.5, 1.0)
 
+        self.b_values = self.b_values.to(d_1.device)
         v = bio_exp(d_1, d_2, f, self.b_values)
 
         # add the rice-bias

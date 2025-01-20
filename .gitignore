@@ -17,3 +17,7 @@ tensors_tra.py
 plot_M.py
 plot_params.py
 .idea/
+dataview_devel
+FailTest.py
+INTERRUPTED.pth
+analysis.py
