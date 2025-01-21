@@ -1,5 +1,6 @@
 from model.unet_model import UNet
-from model.attention_unet import Atten_Unet 
+from model.attention_unet import Atten_Unet
+from model.res_attention_unet import Res_Atten_Unet
 from model.unet_MultiDecoder import UNet_MultiDecoders
 from torch.utils.data import DataLoader, random_split
 from utils import pre_data, patientDataset
@@ -15,8 +16,10 @@ result_path = Path('./results/')
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--load', '-f', type=str, default='../Saved models/attention_unet.pth',
+    parser.add_argument('--load', '-f', type=str, default='../Saved models/residual_attention_unet.pth',
                         help='Load the model to test the result')
+    parser.add_argument('--custom_patient_list', '-clist', type=str, default='predictList.txt', help='Input path to txt file with patient names to be used.')
+
 
     return parser.parse_args()
 
@@ -48,21 +51,29 @@ if __name__ == '__main__':
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
     args = get_args()
+    if args.custom_patient_list:
+        with open(args.custom_patient_list, 'r') as file:
+            # Read the entire file content and split by commas
+            content = file.read().strip()  # Remove leading/trailing whitespace (if any)
+            predict_list = content.split(',')
 
-    test_dir = '../PredictFolder'
+    test_dir = '/TANK/Result_NPY/200302_Patientbmax2000/'
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Load the test dataset
-    test = patientDataset(test_dir)
+    test = patientDataset(test_dir, use_sigma= args.input_sigma,  custom_list=predict_list)
     test_loader = DataLoader(test, batch_size=22, shuffle=False, num_workers=6)
-    test_b0 = test.pre.image_b0()
+    #test_b0 = test.pre.image_b0()
 
     # Initialize the b values [100, 200, 300, ..., 2000]
     b = torch.linspace(0, 2000, steps=21, device=device)
     b = b[1:]
     
     # Load the UNet model
-    net = Atten_Unet(n_channels=20, b=b, rice=False, bilinear=False)
+    #net = Atten_Unet(n_channels=20, b=b, rice=False, bilinear=False)
+    #net = UNet(n_channels=20, b=b, rice=False, bilinear=False)
+    net = Res_Atten_Unet(n_channels=20, b=b, rice=False, bilinear=False)
+
     #net = nn.DataParallel(net)
     checkpoint = torch.load(args.load, map_location=device, weights_only=True)
     modified_checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}

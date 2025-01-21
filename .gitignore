@@ -21,3 +21,9 @@ dataview_devel
 FailTest.py
 INTERRUPTED.pth
 analysis.py
+datahandler.py
+new_patientList.txt
+patientList.txt
+patientList_nonb.txt
+predictList.txt
+

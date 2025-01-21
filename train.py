@@ -3,6 +3,8 @@ from tqdm import tqdm
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
 from yaml import compose
+
+from model.res_attention_unet import Res_Atten_Unet
 from utils import pre_data, post_processing, patientDataset, init_weights
 from model.unet_model import UNet
 from model.unet_MultiDecoder import UNet_MultiDecoders
@@ -25,7 +27,7 @@ def check_gradients(model):
                 print(f"NaN detected in gradient of {name}")
 
 def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, 
-                val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False):
+                val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False, use_sigma = False):
     
     # split into training and validation set
     n_val = int(len(dataset) * val_percent)
@@ -55,6 +57,8 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
     
     criterion = nn.MSELoss()
+    if use_sigma:
+        criterion_sigma = nn.MSELoss()
     global_step = 0
     wandb.watch(models=net, criterion=criterion, log="all", log_freq=10)
 
@@ -67,30 +71,47 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
                    #(batch,_,_)
-            for i, (batch,_) in enumerate(train_loader):
-                images = batch
-                if torch.isnan(images).sum()>0 or torch.max(images)>1e10:
-                    print(f'-Warning: One batch {i} contained {torch.isnan(images).sum().item()} NaN values and {torch.max(images)} as maximum value.\n This batch was skipped.\n')
+            for i, (images,_,sigma,_) in enumerate(train_loader):
+
+                if use_sigma:
+                    input = torch.cat((images, sigma), dim=1)
+                else:
+                    input = images
+                input = input.to(device=device, dtype=torch.float32)
+                images = images.to(device=device, dtype=torch.float32)
+                sigma = sigma.to(device=device, dtype=torch.float32)
+                if torch.isnan(images).sum() > 0 or torch.max(images) > 1e10:
+                    print(
+                        f'-Warning: One batch {i} contained {torch.isnan(images).sum().item()} NaN values and {torch.max(images)} as maximum value.\n This batch was skipped.\n')
                     continue
 
                 if 'parallel' in str(type(net)):
-                    assert images.shape[1] == net.module.n_channels, \
+                    assert input.shape[1] == net.module.n_channels, \
                         f'Network has been defined with {net.module.n_channels} input channels, ' \
-                        f'but loaded images have {images.shape[1]} channels. Please check that ' \
+                        f'but loaded images have {input.shape[1]} channels. Please check that ' \
                         'the images are loaded correctly.'
                 else:
-                    assert images.shape[1] == net.n_channels, \
+                    assert input.shape[1] == net.n_channels, \
                         f'Network has been defined with {net.n_channels} input channels, ' \
-                        f'but loaded images have {images.shape[1]} channels. Please check that ' \
+                        f'but loaded images have {input.shape[1]} channels. Please check that ' \
                         'the images are loaded correctly.'
+                if use_sigma:
+                    M, _, _, _, sigma_output = net(input)
+                    loss =  criterion(M, images)
+                    loss_sigma = criterion_sigma(sigma_output, sigma)
 
-                images = images.to(device=device, dtype=torch.float32)
-
-                M, _, _, _, _ = net(images)
-                loss =  criterion(M, images)
+                else:
+                    M, _, _, _, _ = net(input)
+                    loss = criterion(M, images)
    
                 optimizer.zero_grad()
-                loss.backward()
+
+                if use_sigma:
+                    loss.backward(retain_graph=True)
+                    loss_sigma.backward()
+                else:
+                    loss.backward()
+                    loss_sigma = np.array([0])
                 #check_gradients(net)         
                 torch.nn.utils.clip_grad_value_(net.parameters(), clip_value=0.5)
                 # Clip gradients to a maximum value
@@ -105,12 +126,14 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 if not sweeping:
                     experiment.log({
                     'train loss': loss.item(),
+                    'sigma loss': loss_sigma.item(),
                     'step': global_step,
                     'epoch': epoch
                 })
                 else:
                     wandb.log({
                         'train loss': loss.item(),
+                        'sigma loss': loss_sigma.item(),
                         'step': global_step,
                         'epoch': epoch
                     })
@@ -122,7 +145,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 
             
             with torch.no_grad():
-                val_loss, params, M, img = post_process.evaluate(val_loader, net, device)
+                val_loss, params, M, img,sig = post_process.evaluate(val_loader, net, device, use_sigma = use_sigma)
             scheduler.step(val_loss)
                         
             logging.info('Validation Loss: {}'.format(val_loss))
@@ -136,6 +159,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                             'd1': wandb.Image(params['d1'][0].cpu()),
                             'd2': wandb.Image(params['d2'][0].cpu()),
                             'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
+                            'sigma_true': wandb.Image(sig.cpu()),
                             'M': wandb.Image(M.cpu()),
                             'image': wandb.Image(img.cpu()),
                             'epoch': epoch,
@@ -176,6 +200,10 @@ def get_args():
                         dest='dir')
     parser.add_argument('--parallel_training', '-parallel', action='store_true', help='Use argument for parallel training with multiple GPUs.')
     parser.add_argument('--sweep', '-sweep', action='store_true', help='Use this flag if you want to run hyper parameter tuning')
+    parser.add_argument('--custom_patient_list', '-clist', type=str, default=False, help='Input path to txt file with patient names to be used.')
+    parser.add_argument('--input_sigma', '-s', action='store_true', help='Use argument if sigma map is used as input.')
+
+
 
 
     return parser.parse_args()
@@ -207,9 +235,18 @@ def sweep(config = None):
 
 if __name__ == '__main__':
     args = get_args()
-
     data_dir = args.patientData
-    patientData = patientDataset(data_dir, transform=False)
+
+    if args.custom_patient_list:
+        with open(args.custom_patient_list, 'r') as file:
+            # Read the entire file content and split by commas
+            content = file.read().strip()  # Remove leading/trailing whitespace (if any)
+            patient_list = content.split(',')
+        patientData = patientDataset(data_dir, use_sigma=args.input_sigma, custom_list=patient_list, transform=False)
+    else:
+        patientData = patientDataset(data_dir, use_sigma=args.input_sigma, transform=False)
+
+
 
     sweep_config = {
         "name": "sweepDenoiseMRI",
@@ -229,21 +266,26 @@ if __name__ == '__main__':
 
     b = torch.linspace(0, 2000, steps=21)
     b = b[1:]
-    n_channels = 20
+    if args.input_sigma:
+        n_channels = 21
+    else:
+        n_channels = 20
 
         
 
     if torch.cuda.device_count() > 1 & args.parallel_training == True:
         print("Using ", torch.cuda.device_count(), " GPUs!\n")
-        #n_mess = "atten_unet"
-        #net = Atten_Unet(n_channels=n_channels,b=b,rice=True)
+        n_mess = "atten_unet"
+        net = Atten_Unet(n_channels=n_channels,b=b,rice=True)
         # use the multi-decoders unet
         # net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear, attention=False)
         # n_mess = "Unet-MultiDecoders"
 
         # use standard u-net
-        net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
-        n_mess = "Standard Unet"
+        #net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
+        #n_mess = "Standard Unet"
+        #net = Res_Atten_Unet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
+        #n_mess = "Residual Attention Unet"
 
         # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
         net = nn.DataParallel(net)
@@ -260,7 +302,7 @@ if __name__ == '__main__':
         # n_mess = "Unet-MultiDecoders"
 
         # use standard u-net
-        net = UNet(n_channels=20, b=b, rice=True, bilinear=args.bilinear)
+        net = UNet(n_channels=n_channels, b=b, rice=True, bilinear=args.bilinear)
         n_mess = "Standard Unet"
         logging.info(f'Network:\n'
                      f'\t{n_mess}\n'
@@ -288,6 +330,7 @@ if __name__ == '__main__':
                       batch_size=args.batch_size,
                       learning_rate=args.lr,
                       val_percent=args.val / 100,
+                      use_sigma=args.input_sigma
                       )
         except KeyboardInterrupt:
             torch.save(net.state_dict(), 'INTERRUPTED.pth')
