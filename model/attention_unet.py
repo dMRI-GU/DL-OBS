@@ -3,11 +3,13 @@ from model.utils import *
 from cmath import sqrt
 
 class Atten_Unet(nn.Module):
-    def __init__(self, n_channels, b, rice=True, bilinear=False):
+    def __init__(self, n_channels, input_sigma: bool, rice=True, bilinear=False):
         super(Atten_Unet, self).__init__()
+        self.input_sigma = input_sigma
         self.n_channels = n_channels
-        self.n_classes = 4
-        self.b_values = b.reshape(1, len(b), 1, 1)
+        if self.input_sigma:
+            self.n_classes = 3
+        else:  self.n_classes = 4
         self.bilinear = bilinear
         self.rice = rice
 
@@ -38,7 +40,7 @@ class Atten_Unet(nn.Module):
 
 
 
-    def forward(self, x):
+    def forward(self, x,b,b0,sigma_true, scale_factor):
        
         x1 = self.inc(x)
         x2 = self.down1(x1)
@@ -70,27 +72,30 @@ class Atten_Unet(nn.Module):
         d_1 = logits[:, 0:1, :, :]
         d_2 = logits[:, 1:2, :, :]
         f = logits[:, 2:3, :, :]
-        sigma = logits[:, 3:4, :, :]
-        sigma[sigma == 0.] = 1e-8
+        #sigma = logits[:, 3:4, :, :]
+        if self.input_sigma:
+            sigma_final = sigma_true
+        else:
+            sigma_final = logits[:, 3:4, :, :]
 
+        sigma_final[sigma_final == 0.] = 1e-8
         # make sure D1 is the larger value between D1 and D2
         if torch.mean(d_1) < torch.mean(d_2):
             d_1, d_2 = d_2, d_1
-            f = 1 - f 
-        
-        d_1 = sigmoid_cons(d_1, 2.0, 2.4)
-        d_2 = sigmoid_cons(d_2, 0.1, 0.5)
-        f = sigmoid_cons(f, 0.5, 1.0)
+            f = 1 - f
 
-        self.b_values = self.b_values.to(d_1.device)
+        d_1 = sigmoid_cons(d_1, 0, 4)#testa utan också
+        d_2 = sigmoid_cons(d_2, 0, 1)
+        f = sigmoid_cons(f, 0.1, 0.9)
         # get the expectation of the clean images
-        v = bio_exp(d_1, d_2, f, self.b_values)
-
+        v = bio_exp(d_1, d_2, f,b )
+        v = (b0*v)/(scale_factor.view(-1,1,1,1))
         # add the rician bias
         if self.rice:
-            res = rice_exp(v, sigma)
+            res = rice_exp(v, sigma_final)
         else:
             res = v
+        #print(f'b0 {b0.shape} and v {v.shape} and scale_factor {scale_factor.view(-1,1,1,1).shape} and sigma {sigma.shape} and res {res.shape}')
 
         #if torch.isnan(res).any():
         #    print(f"NaNs detected in RES")
@@ -102,7 +107,7 @@ class Atten_Unet(nn.Module):
         #    torch.save(f, f'{path}f.pt')
         #    sys.exit()
 
-        return res, d_1, d_2, f, sigma
+        return res, d_1, d_2, f, sigma_final
     
     def pad_cat(self, s, b):
         """The feature map of s is smaller than that of b"""

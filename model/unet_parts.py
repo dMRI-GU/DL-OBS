@@ -116,7 +116,7 @@ class Up_conv(nn.Module):
 
 class Decoder(nn.Module):
     """Stack several upsampling layers"""
-    def __init__(self, channels, factor, bilinear):
+    def __init__(self, channels, factor, bilinear, out_channel = 1):
         """
         channels - e.g [1024, 512, 256, 128, 64]
         """
@@ -125,7 +125,7 @@ class Decoder(nn.Module):
         self.up2 = Up(channels[1], channels[2] // factor, bilinear)
         self.up3 = Up(channels[2], channels[3] // factor, bilinear)
         self.up4 = Up(channels[3], channels[4], bilinear)
-        self.outc = OutConv(channels[4], 1)
+        self.outc = OutConv(channels[4], out_channel)
 
     def forward(self, f_maps, x5):
         """
@@ -139,7 +139,7 @@ class Decoder(nn.Module):
         return torch.abs(self.outc(x))
 
 class Atten_Decoder(nn.Module):
-    def __init__(self, channels, factor):
+    def __init__(self, channels, factor, out_channel=1):
         """channels - e.g [1024, 512, 256, 128, 64]"""
         super(Atten_Decoder, self).__init__()
 
@@ -159,7 +159,7 @@ class Atten_Decoder(nn.Module):
         self.atten4 = Attention_block(channels[4], channels[4], channels[4] // 2)
         self.dbconv4 = DoubleConv(channels[3], channels[4])
 
-        self.outc = OutConv(channels[4], 1)
+        self.outc = OutConv(channels[4], out_channel)
 
     def forward(self, f_maps, x5):       
         x4, x3, x2, x1 = f_maps

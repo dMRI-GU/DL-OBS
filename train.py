@@ -18,23 +18,23 @@ import argparse
 import torch
 from IPython import embed
 import numpy as np
+from pytorch_msssim import MS_SSIM
 dir_checkpoint = Path('../checkpoints/')
-
 def check_gradients(model):
     for name, param in model.named_parameters():
         if param.grad is not None:
             if torch.isnan(param.grad).any():
                 print(f"NaN detected in gradient of {name}")
 
-def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5, 
-                val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False, use_sigma = False):
-    
+def train_net(dataset, net, device, b,  input_sigma: bool, epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5,
+    val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False):
+    b = b.reshape(1, len(b), 1, 1)
     # split into training and validation set
     n_val = int(len(dataset) * val_percent)
     n_train = len(dataset) - n_val
     train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
-    loader_args = dict(batch_size=batch_size, num_workers=6, pin_memory=True)
+    loader_args = dict(batch_size=batch_size, num_workers=4, pin_memory=True)
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
@@ -56,9 +56,9 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
     
-    criterion = nn.MSELoss()
-    if use_sigma:
-        criterion_sigma = nn.MSELoss()
+    #criterion = nn.MSELoss()
+    criterion = MS_SSIM(channel=20,win_size=5)
+    criterion2 = nn.MSELoss()
     global_step = 0
     wandb.watch(models=net, criterion=criterion, log="all", log_freq=10)
 
@@ -71,47 +71,40 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
 
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
                    #(batch,_,_)
-            for i, (images,_,sigma,_) in enumerate(train_loader):
+            for i, (images,image_b0,sigma,scale_factor) in enumerate(train_loader):
 
-                if use_sigma:
-                    input = torch.cat((images, sigma), dim=1)
-                else:
-                    input = images
-                input = input.to(device=device, dtype=torch.float32)
-                images = images.to(device=device, dtype=torch.float32)
-                sigma = sigma.to(device=device, dtype=torch.float32)
+                images = images.to(device=device, dtype=torch.float32,non_blocking=True)
+                sigma = sigma.to(device=device, dtype=torch.float32,non_blocking=True)
+                image_b0 = image_b0.to(device=device, dtype=torch.float32,non_blocking=True)
+                scale_factor = scale_factor.to(device=device, dtype=torch.float32,non_blocking=True)
+                b = b.to(device=device, dtype=torch.float32,non_blocking=True)
                 if torch.isnan(images).sum() > 0 or torch.max(images) > 1e10:
                     print(
                         f'-Warning: One batch {i} contained {torch.isnan(images).sum().item()} NaN values and {torch.max(images)} as maximum value.\n This batch was skipped.\n')
                     continue
 
                 if 'parallel' in str(type(net)):
-                    assert input.shape[1] == net.module.n_channels, \
+                    assert images.shape[1] == net.module.n_channels, \
                         f'Network has been defined with {net.module.n_channels} input channels, ' \
-                        f'but loaded images have {input.shape[1]} channels. Please check that ' \
+                        f'but loaded images have {images.shape[1]} channels. Please check that ' \
                         'the images are loaded correctly.'
                 else:
-                    assert input.shape[1] == net.n_channels, \
+                    assert images.shape[1] == net.n_channels, \
                         f'Network has been defined with {net.n_channels} input channels, ' \
-                        f'but loaded images have {input.shape[1]} channels. Please check that ' \
+                        f'but loaded images have {images.shape[1]} channels. Please check that ' \
                         'the images are loaded correctly.'
-                if use_sigma:
-                    M, _, _, _, sigma_output = net(input)
-                    loss =  criterion(M, images)
-                    loss_sigma = criterion_sigma(sigma_output, sigma)
 
-                else:
-                    M, _, _, _, _ = net(input)
-                    loss = criterion(M, images)
-   
+                M, _, _, _, _ = net(images,b,image_b0, sigma,scale_factor)
+                M = M*scale_factor.view(-1,1,1,1)
+                images = images*scale_factor.view(-1,1,1,1)
+                criterion.data_range = torch.max(images)
+
+                loss_ssim = 1-criterion(M, images)
+                loss_mse = criterion2(M,images)
+                loss = loss_ssim*loss_mse
                 optimizer.zero_grad()
+                loss.backward()
 
-                if use_sigma:
-                    loss.backward(retain_graph=True)
-                    loss_sigma.backward()
-                else:
-                    loss.backward()
-                    loss_sigma = np.array([0])
                 #check_gradients(net)         
                 torch.nn.utils.clip_grad_value_(net.parameters(), clip_value=0.5)
                 # Clip gradients to a maximum value
@@ -126,14 +119,14 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 if not sweeping:
                     experiment.log({
                     'train loss': loss.item(),
-                    'sigma loss': loss_sigma.item(),
+                    'ssim_loss': loss_ssim.item(),
+                    'mse_loss': loss_mse.item(),
                     'step': global_step,
                     'epoch': epoch
                 })
                 else:
                     wandb.log({
                         'train loss': loss.item(),
-                        'sigma loss': loss_sigma.item(),
                         'step': global_step,
                         'epoch': epoch
                     })
@@ -145,7 +138,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                 
             
             with torch.no_grad():
-                val_loss, params, M, img,sig = post_process.evaluate(val_loader, net, device, use_sigma = use_sigma)
+                val_loss, params, M, img,sig = post_process.evaluate(val_loader, net, device, b, input_sigma=input_sigma)
             scheduler.step(val_loss)
                         
             logging.info('Validation Loss: {}'.format(val_loss))
@@ -158,8 +151,7 @@ def train_net(dataset, net, device, b, epochs: int=5, batch_size: int=2, learnin
                             'min Image': img.cpu().min(),
                             'd1': wandb.Image(params['d1'][0].cpu()),
                             'd2': wandb.Image(params['d2'][0].cpu()),
-                            'sigma_g': wandb.Image(params['sigma_g'][0].cpu()),
-                            'sigma_true': wandb.Image(sig.cpu()),
+                            'sigma_true' if input_sigma else 'predicted_sigma': wandb.Image(sig.cpu()),
                             'M': wandb.Image(M.cpu()),
                             'image': wandb.Image(img.cpu()),
                             'epoch': epoch,
@@ -195,7 +187,7 @@ def get_args():
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--patientData', '-dir', type=str, default='/m2_data/Mustafa_SHARE/save_npy', help='Enther the directory saving the patient data')
+    parser.add_argument('--patientData', '-dir', type=str, default='/m2_data/mustafa/patientData/', help='Enther the directory saving the patient data')
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
     parser.add_argument('--parallel_training', '-parallel', action='store_true', help='Use argument for parallel training with multiple GPUs.')
@@ -242,9 +234,9 @@ if __name__ == '__main__':
             # Read the entire file content and split by commas
             content = file.read().strip()  # Remove leading/trailing whitespace (if any)
             patient_list = content.split(',')
-        patientData = patientDataset(data_dir, use_sigma=args.input_sigma, custom_list=patient_list, transform=False)
+        patientData = patientDataset(data_dir,input_sigma=args.input_sigma,  custom_list=patient_list, transform=False)
     else:
-        patientData = patientDataset(data_dir, use_sigma=args.input_sigma, transform=False)
+        patientData = patientDataset(data_dir,input_sigma=args.input_sigma, transform=False)
 
 
 
@@ -264,19 +256,17 @@ if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
-    b = torch.linspace(0, 2000, steps=21)
+    b = torch.linspace(0, 2000, steps=21, device=device)
     b = b[1:]
-    if args.input_sigma:
-        n_channels = 21
-    else:
-        n_channels = 20
+
+    n_channels = 20
 
         
 
     if torch.cuda.device_count() > 1 & args.parallel_training == True:
         print("Using ", torch.cuda.device_count(), " GPUs!\n")
         n_mess = "atten_unet"
-        net = Atten_Unet(n_channels=n_channels,b=b,rice=True)
+        net = Atten_Unet(n_channels=n_channels, input_sigma=args.input_sigma,rice=True)
         # use the multi-decoders unet
         # net = UNet_MultiDecoders(n_channels=20, b=b, rice=True, bilinear=args.bilinear, attention=False)
         # n_mess = "Unet-MultiDecoders"
@@ -288,7 +278,7 @@ if __name__ == '__main__':
         #n_mess = "Residual Attention Unet"
 
         # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
-        net = nn.DataParallel(net)
+        net = nn.parallel.DistributedDataParallel(net)
 
         logging.info(f'Network:\n'
                      f'\t{n_mess}\n'
@@ -302,8 +292,8 @@ if __name__ == '__main__':
         # n_mess = "Unet-MultiDecoders"
 
         # use standard u-net
-        net = UNet(n_channels=n_channels, b=b, rice=True, bilinear=args.bilinear)
-        n_mess = "Standard Unet"
+        n_mess = "atten_unet"
+        net = Atten_Unet(n_channels=n_channels,input_sigma=args.input_sigma, rice=True)
         logging.info(f'Network:\n'
                      f'\t{n_mess}\n'
                      f'\t{net.n_channels} input channels\n'
@@ -330,8 +320,7 @@ if __name__ == '__main__':
                       batch_size=args.batch_size,
                       learning_rate=args.lr,
                       val_percent=args.val / 100,
-                      use_sigma=args.input_sigma
-                      )
+                      input_sigma=args.input_sigma)
         except KeyboardInterrupt:
             torch.save(net.state_dict(), 'INTERRUPTED.pth')
             logging.info('Saved interrupt')
