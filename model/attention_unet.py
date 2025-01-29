@@ -67,7 +67,9 @@ class Atten_Unet(nn.Module):
         x1 = self.atten4(d2, x1)
         d2 = self.pad_cat(d2, x1)
         d2 = self.dbconv4(d2)
-        logits = torch.abs(self.outc(d2))
+        logits =self.outc(d2)
+        if torch.isnan(logits).sum() > 0 or torch.max(logits) > 1e10:
+            print(f'-Warning: Logits contained {torch.isnan(logits).sum().item()} NaN values and {torch.max(logits)} as maximum value.\n')
 
         d_1 = logits[:, 0:1, :, :]
         d_2 = logits[:, 1:2, :, :]
@@ -88,8 +90,12 @@ class Atten_Unet(nn.Module):
         d_2 = sigmoid_cons(d_2, 0, 1)
         f = sigmoid_cons(f, 0.1, 0.9)
         # get the expectation of the clean images
+
+
         v = bio_exp(d_1, d_2, f,b )
+
         v = (b0*v)/(scale_factor.view(-1,1,1,1))
+
         # add the rician bias
         if self.rice:
             res = rice_exp(v, sigma_final)

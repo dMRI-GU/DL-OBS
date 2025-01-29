@@ -153,7 +153,7 @@ class post_processing():
     def __init__(self):
         super().__init__()
     
-    def evaluate(self, val_loader, net, device, b, input_sigma: bool):
+    def evaluate(self, val_loader, net, rank, b, input_sigma: bool):
         """
         evlaute the performance of network 
         """
@@ -167,10 +167,10 @@ class post_processing():
         final_sigma = 0
         for images,image_b0,sigma,scale_factor in val_loader:
 
-            images = images.to(device=device, dtype=torch.float32,non_blocking=True)
-            sigma = sigma.to(device=device, dtype=torch.float32,non_blocking=True)
-            image_b0 = image_b0.to(device=device, dtype=torch.float32,non_blocking=True)
-            scale_factor = scale_factor.to(device=device, dtype=torch.float32,non_blocking=True)
+            images = images.to(rank, dtype=torch.float32, non_blocking=True)
+            sigma = sigma.to(rank, dtype=torch.float32, non_blocking=True)
+            image_b0 = image_b0.to(rank, dtype=torch.float32, non_blocking=True)
+            scale_factor = scale_factor.to(rank, dtype=torch.float32, non_blocking=True)
             M, d1, d2, f,sigma_out = net(images,b,image_b0, sigma, scale_factor)
             M = M * scale_factor.view(-1, 1, 1, 1)
             images = images * scale_factor.view(-1, 1, 1, 1)
@@ -186,7 +186,8 @@ class post_processing():
             if input_sigma:
                 final_sigma = sigma[0,0,:,:]
             else:
-                final_sigma  =sigma_out[0,:,:]
+                final_sigma  =sigma_out[0,0,:,:]
+
 
             val_losses += loss_value
 

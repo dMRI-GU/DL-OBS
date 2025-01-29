@@ -5,7 +5,7 @@ def sigmoid_cons(param, dmin, dmax):
     """
     constrain the output physilogical parameters into a certain domain
     """
-    return dmin+torch.sigmoid(param)*(dmax-dmin)
+    return dmin+(torch.sigmoid(param))*(dmax-dmin)
 
 def rice_exp(v, sigma):
     """
