@@ -4,11 +4,21 @@ from cmath import sqrt
 
 
 class Res_Atten_Unet(nn.Module):
-    def __init__(self, n_channels, b, rice=True, bilinear=False):
+    def __init__(self, n_channels, input_sigma: bool, fitting_model:str, rice=True, bilinear=False):
         super(Res_Atten_Unet, self).__init__()
+        self.input_sigma = input_sigma
         self.n_channels = n_channels
-        self.n_classes = 4
-        self.b_values = b.reshape(1, len(b), 1, 1)
+        self.fitting_model = fitting_model
+        if fitting_model == 'biexp':
+            self.n_classes = 3
+        elif fitting_model == 'kurtosis':
+            self.n_classes = 2
+        elif fitting_model == 'gamma':
+            self.n_classes = 2
+            ####################################################################################
+        if not self.input_sigma:
+            self.n_classes += 1
+
         self.bilinear = bilinear
         self.rice = rice
 
@@ -37,7 +47,7 @@ class Res_Atten_Unet(nn.Module):
 
         self.outc = OutConv(64, self.n_classes)
 
-    def forward(self, x):
+    def forward(self, x,b,b0,sigma_true, scale_factor):
 
         x1 = self.inc(x)
         x2 = self.down1(x1)
@@ -64,44 +74,85 @@ class Res_Atten_Unet(nn.Module):
         x1 = self.atten4(d2, x1)
         d2 = self.pad_cat(d2, x1)
         d2 = self.dbconv4(d2)
-        logits = torch.abs(self.outc(d2))
+        logits = self.outc(d2)
+        if torch.isnan(logits).sum() > 0 or torch.max(logits) > 1e10:
+            print(
+                f'-Warning: Logits contained {torch.isnan(logits).sum().item()} NaN values and {torch.max(logits)} as maximum value.\n')
+        if self.fitting_model == 'biexp':
+            d_1 = logits[:, 0:1, :, :]
+            d_2 = logits[:, 1:2, :, :]
+            f = logits[:, 2:3, :, :]
+            # sigma = logits[:, 3:4, :, :]
+            if self.input_sigma:
+                sigma_final = sigma_true
+            else:
+                sigma_final = logits[:, 3:4, :, :]
 
-        d_1 = logits[:, 0:1, :, :]
-        d_2 = logits[:, 1:2, :, :]
-        f = logits[:, 2:3, :, :]
-        sigma = logits[:, 3:4, :, :]
-        sigma[sigma == 0.] = 1e-8
+            sigma_final[sigma_final == 0.] = 1e-8
+            # make sure D1 is the larger value between D1 and D2
+            if torch.mean(d_1) < torch.mean(d_2):
+                d_1, d_2 = d_2, d_1
+                f = 1 - f
 
-        # make sure D1 is the larger value between D1 and D2
-        if torch.mean(d_1) < torch.mean(d_2):
-            d_1, d_2 = d_2, d_1
-            f = 1 - f
+            d_1 = sigmoid_cons(d_1, 0, 4)  # testa utan också
+            d_2 = sigmoid_cons(d_2, 0, 1)
+            f = sigmoid_cons(f, 0.1, 0.9)
+            # get the expectation of the clean images
 
-        d_1 = sigmoid_cons(d_1, 2.0, 2.4)
-        d_2 = sigmoid_cons(d_2, 0.1, 0.5)
-        f = sigmoid_cons(f, 0.5, 1.0)
+            v = bio_exp(d_1, d_2, f, b)
 
-        self.b_values = self.b_values.to(d_1.device)
-        # get the expectation of the clean images
-        v = bio_exp(d_1, d_2, f, self.b_values)
+            v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
+            if self.rice:
+                res = rice_exp(v, sigma_final)
+            else:
+                res = v
+            return res, {'d1': d_1, 'd2': d_2, 'f': f, 'sigma': sigma_final * scale_factor.view(-1, 1, 1, 1)}
 
-        # add the rician bias
-        if self.rice:
-            res = rice_exp(v, sigma)
-        else:
-            res = v
+        elif self.fitting_model == 'kurtosis':
 
-        # if torch.isnan(res).any():
-        #    print(f"NaNs detected in RES")
-        #    path = '/m2_data/mustafa/FailTest/'
-        #    torch.save(v, f'{path}v.pt')
-        #    torch.save(sigma, f'{path}sigma.pt')
-        #    torch.save(d_1, f'{path}d1.pt')
-        #    torch.save(d_2, f'{path}d2.pt')
-        #    torch.save(f, f'{path}f.pt')
-        #    sys.exit()
+            d = logits[:, 0:1, :, :]
+            k = logits[:, 1:2, :, :]
+            if self.input_sigma:
+                sigma_final = sigma_true
+            else:
+                sigma_final = logits[:, 2:3, :, :]
 
-        return res, d_1, d_2, f, sigma
+            sigma_final[sigma_final == 0.] = 1e-8
+            # make sure D1 is the larger value between D1 and D2
+
+            d = sigmoid_cons(d, 0, 4)
+            k = sigmoid_cons(k, 0, 1)
+            # get the expectation of the clean images
+            v = kurtosis(b, D=d, K=k)
+
+            v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
+            if self.rice:
+                res = rice_exp(v, sigma_final)
+            else:
+                res = v
+            return res, {'D': d, 'K': k, 'sigma': sigma_final * scale_factor.view(-1, 1, 1, 1)}
+        elif self.fitting_model == 'gamma':
+            theta = logits[:, 0:1, :, :]
+            k = logits[:, 1:2, :, :]
+            if self.input_sigma:
+                sigma_final = sigma_true
+            else:
+                sigma_final = logits[:, 2:3, :, :]
+
+            sigma_final[sigma_final == 0.] = 1e-8
+            # make sure D1 is the larger value between D1 and D2
+
+            theta = sigmoid_cons(theta, 0, 10)
+            k = sigmoid_cons(k, 0, 20)
+            # get the expectation of the clean images
+            v = gamma(bval=b, theta=theta, K=k)
+
+            v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
+            if self.rice:
+                res = rice_exp(v, sigma_final)
+            else:
+                res = v
+            return res, {'Theta': theta, 'K': k, 'sigma': sigma_final * scale_factor.view(-1, 1, 1, 1)}
 
     def pad_cat(self, s, b):
         """The feature map of s is smaller than that of b"""

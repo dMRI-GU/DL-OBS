@@ -28,5 +28,13 @@ def kurtosis(bval, D, K):
     """
     torch kurtosis function
     """
+
     X = torch.exp(-bval*D*1e-3+(bval*D*1e-3)**2*K/6+1e-6)
+
+    return X
+def gamma(bval, theta, K):
+    """
+    torch gamma function
+    """
+    X = torch.float_power(1+theta*bval*1e-3,-K)+1e-6
     return X

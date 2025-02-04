@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, random_split
 from yaml import compose
 
 from model.res_attention_unet import Res_Atten_Unet
-from utils import pre_data, post_processing, patientDataset, init_weights
+from utils import post_processing, patientDataset, init_weights
 from model.unet_model import UNet
 from model.unet_MultiDecoder import UNet_MultiDecoders
 from model.attention_unet import Atten_Unet
@@ -40,7 +40,7 @@ class CustomLoss(nn.Module):
     def __init__(self):
         super(CustomLoss, self).__init__()
         self.ssim_loss = MS_SSIM(channel=20,win_size=5)
-        self.mse_loss =  nn.MSELoss()
+        self.mse_loss =  nn.MSELoss()#nn.L1Loss()#nn.MSELoss()
     def update_data_range(self, range):
         self.ssim_loss.data_range = range
     def forward(self, M,images):
@@ -49,8 +49,9 @@ class CustomLoss(nn.Module):
         loss_mse = self.mse_loss(M, images)
         return loss_ssim * loss_mse
 
-def train_net(dataset, net, b, input_sigma: bool,experiment, world_size=None,rank = None,device = None,  epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5,
+def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str, fitting_model: str,run_number: str, world_size=None,rank = None,device = None,  epochs: int=5, batch_size: int=2, learning_rate: float = 1e-5,
     val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False):
+    args = get_args()
     b = b.reshape(1, len(b), 1, 1)
     # split into training and validation set
     n_val = int(len(dataset) * val_percent)
@@ -65,7 +66,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, world_size=None,ran
         sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank)
 
 
-    loader_args = dict(batch_size=batch_size, num_workers=4, pin_memory=True)
+    loader_args = dict(batch_size=batch_size, num_workers=0, pin_memory=True)
     train_loader = DataLoader(train_set, shuffle=False if not sweeping else True,sampler = sampler, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
@@ -135,7 +136,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, world_size=None,ran
                         f'but loaded images have {images.shape[1]} channels. Please check that ' \
                         'the images are loaded correctly.'
 
-                M, _, _, _, _ = net(images,b,image_b0, sigma,scale_factor)
+                M, _ = net(images,b,image_b0, sigma,scale_factor)
                 M = M*scale_factor.view(-1,1,1,1)
                 images = images*scale_factor.view(-1,1,1,1)
                 criterion.update_data_range(torch.max(images))
@@ -146,7 +147,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, world_size=None,ran
                 # Print the maximum gradient before clipping
                 
                 max_grad_before = max(p.grad.abs().max().item() for p in net.parameters() if p.grad is not None)
-                torch.nn.utils.clip_grad_value_(net.parameters(), clip_value=0.5)
+                torch.nn.utils.clip_grad_value_(net.parameters(), clip_value=1)
                 # Clip gradients to a maximum value
                           
                 optimizer.step()
@@ -176,41 +177,35 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, world_size=None,ran
                 scheduler.step(val_loss)
 
                 logging.info('Validation Loss: {}'.format(val_loss))
-                experiment.log({'learning rate': optimizer.param_groups[0]['lr'],
+                logging_dict = {'learning rate': optimizer.param_groups[0]['lr'],
                             'validation Loss': val_loss,
                             'Max M': M.cpu().max(),
                             'Min M': M.cpu().min(),
-                            'Max d1': params['d1'][0].cpu().max(),
-                            'Min d1': params['d1'][0].cpu().min(),
-                            'Max d2': params['d2'][0].cpu().max(),
-                            'Min d2': params['d2'][0].cpu().min(),
-                            'Max f': params['f'][0].cpu().max(),
-                            'Min f': params['f'][0].cpu().min(),
                             'max Image': img.cpu().max(),
                             'min Image': img.cpu().min(),
-                            'd1': wandb.Image(params['d1'][0].cpu()),
-                            'd2': wandb.Image(params['d2'][0].cpu()),
-                            'f': wandb.Image(params['f'][0].cpu()),
                             'sigma_true' if input_sigma else 'predicted_sigma': wandb.Image(sig.cpu()),
                             'M': wandb.Image(M.cpu()),
                             'image': wandb.Image(img.cpu()),
                             'epoch': epoch,
                             'avg_loss':avg_loss/num_batches
-                            })
+                            }
+                logging_dict.update(params)
+                experiment.log(logging_dict)
 
 
         # save the model for the current epoch
-        if rank==0 and save_checkpoint and not os.getenv("WANDB_SWEEP_ID"):
-
-            Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
-            torch.save(net.state_dict(), str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
-            logging.info(f'Checkpoint {epoch} saved!')
-        elif sweeping and save_checkpoint and  os.getenv("WANDB_SWEEP_ID") and epoch == epochs:
-            sweep_check_path  = Path(os.path.join(dir_checkpoint,'Sweep'))
-            sweep_check_path.mkdir(parents=True, exist_ok=True)
-            torch.save(net.state_dict(), str(sweep_check_path / f'Batch_size {batch_size} num_epochs {epochs} lr {learning_rate:.4f}_.pth'))
+        if rank==0 and save_checkpoint and not os.getenv("WANDB_SWEEP_ID") and epoch%5==0:
+            save_path  = Path(os.path.join(dir_checkpoint,args.main_folder,training_model,fitting_model))
+            save_path.mkdir(parents=True, exist_ok=True)
+            torch.save(net.state_dict(), str(save_path / f'checkpoint_epoch{epoch}.pth'))
             logging.info(f'Sweep run (Batch_size {batch_size} num_epochs {epochs} lr {learning_rate:.4f}) saved!')
-    
+
+        elif sweeping and save_checkpoint and  os.getenv("WANDB_SWEEP_ID") and epoch%5==0 and epoch>19:
+            save_path = Path(os.path.join(dir_checkpoint,training_model,fitting_model,f'run_{run_number}'))
+            Path(save_path).mkdir(parents=True, exist_ok=True)
+            torch.save(net.state_dict(), str(save_path / 'checkpoint_epoch{}.pth'.format(epoch)))
+            logging.info(f'Checkpoint {epoch} saved!')
+
     if rank ==0 or sweeping:
         experiment.finish()
 
@@ -227,15 +222,17 @@ def get_args():
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--patientData', '-dir', type=str, default='/m2_data/mustafa/patientData/', help='Enther the directory saving the patient data')
+    parser.add_argument('--patientData', '-dir', type=str, default='/m2_data/mustafa/patientDataReduced/', help='Enther the directory saving the patient data')
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
     parser.add_argument('--parallel_training', '-parallel', action='store_true', help='Use argument for parallel training with multiple GPUs.')
     parser.add_argument('--sweep', '-sweep', action='store_true', help='Use this flag if you want to run hyper parameter tuning')
     parser.add_argument('--custom_patient_list', '-clist', type=str, help='Input path to txt file with patient names to be used.')#default='new_patientList.txt'
     parser.add_argument('--input_sigma', '-s', default=True, help='Use argument if sigma map is used as input.')
-
-
+    parser.add_argument('--training_model', '-trn', default='attention_unet',help='Specify which training model to use. Choose between ...,...,...')
+    parser.add_argument('--fitting_model', '-fit', default='biexp', help='Specify which fitting model to use')
+    parser.add_argument('--run_number', '-rnum', default='1', help='This argument is used by sweep_train.py')
+    parser.add_argument('--main_folder', '-folder', default='cross_validation_l2', help='Specify folder name to be used for saving')
 
 
     return parser.parse_args()
@@ -269,8 +266,16 @@ def main(rank,world_size ,sweep):
     b = b[1:]
 
     n_channels = 20
-    n_mess = "atten_unet"
-    net = Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma).cuda()
+
+    if args.training_model == 'attention_unet':
+        n_mess = "atten_unet"
+        net = Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
+    elif args.training_model == 'unet':
+        n_mess = "unet"
+        net = UNet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
+    elif args.training_model == 'res_atten_unet':
+        n_mess = "res_atten_unet"
+        net = Res_Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
     if rank == 0:
         print("Using ", torch.cuda.device_count(), " GPUs!\n")
         logging.info(f'Network:\n'
@@ -288,9 +293,10 @@ def main(rank,world_size ,sweep):
 
     device = None
     if os.getenv("WANDB_SWEEP_ID"):
-        print('running swep')
+        print('running sweep')
         experiment = wandb.init()  # Automatically pulls sweep parameters
         config = wandb.config
+        #wandb.run.name = str(f'Batch_size {config.batch_size} num_epochs {config.epochs} lr {config.learning_rate:.4f}')
         wandb.run.name = str(f'Batch_size {config.batch_size} num_epochs {config.epochs} lr {config.learning_rate:.4f}')
 
         epochs = config['epochs']
@@ -300,7 +306,7 @@ def main(rank,world_size ,sweep):
         print('Using device:', device)
 
     else:
-        print('not running swep')
+        print('not running sweep')
 
         epochs = args.epochs
         batch_size = args.batch_size
@@ -316,18 +322,21 @@ def main(rank,world_size ,sweep):
     try:
         if sweep:
             train_net(dataset=patientData,
-                          net=net,
-                          world_size=world_size,
-                          b = b,
-                          epochs=epochs,
-                          batch_size=batch_size,
-                          learning_rate=learning_rate,
-                          val_percent=args.val / 100,
-                          input_sigma=args.input_sigma,
+                      net=net,
+                      world_size=world_size,
+                      b = b,
+                      epochs=epochs,
+                      batch_size=batch_size,
+                      learning_rate=learning_rate,
+                      val_percent=args.val / 100,
+                      input_sigma=args.input_sigma,
                       experiment = experiment,
                       save_checkpoint=True,
                       sweeping=True,
                       device=device,
+                      training_model = args.training_model,
+                      fitting_model = args.fitting_model,
+                      run_number= args.run_number
                       )
         else:
             train_net(dataset=patientData,
@@ -341,7 +350,11 @@ def main(rank,world_size ,sweep):
                       val_percent=args.val / 100,
                       input_sigma=args.input_sigma,
                       experiment=experiment,
-                      save_checkpoint=True)
+                      save_checkpoint=True,
+                      training_model = args.training_model,
+                      fitting_model = args.fitting_model,
+                      run_number = args.run_number
+            )
     except KeyboardInterrupt:
         torch.save(net.state_dict(), 'INTERRUPTED.pth')
         logging.info('Saved interrupt')
