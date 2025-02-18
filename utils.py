@@ -72,13 +72,14 @@ class patientDataset(Dataset):
     '''
     wrap the patient numpy data to be dealt by the dataloader
     '''
-    def __init__(self, data_dir, input_sigma: bool, transform=None, num_slices=22, normalize = True, custom_list = None):
+    def __init__(self, data_dir, input_sigma: bool, transform=None, normalize = True, custom_list = None, crop=True):
         super(Dataset).__init__()
         self.data_dir = data_dir
         self.transform = transform
         self.num_slices = 22
         self.num_direction = 3
         self.input_sigma = input_sigma
+        self.crop = crop
 
         # Must not include ToTensor()!
         if custom_list is not None:
@@ -123,7 +124,7 @@ class patientDataset(Dataset):
         slice_indice = idx % self.num_slices
 
         #imgs,means,stds
-        imgs,b0_data, sigma, factor = self.image_data(self.data[pats_indice], slice_indice, direction_indice,self.input_sigma, normalize=self.normalize)
+        imgs,b0_data, sigma, factor = self.image_data(self.data[pats_indice], slice_indice, direction_indice,self.input_sigma, normalize=self.normalize, crop=self.crop)
         
         if self.transform:
             imgs = self.transform(imgs)

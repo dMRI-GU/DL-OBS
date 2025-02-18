@@ -34,7 +34,7 @@ class CustomLoss(nn.Module):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--load', '-f', type=str, default='../checkpoints/cross_validation_l1',
+    parser.add_argument('--load', '-f', type=str, default='../checkpoints/cross_validation_l2',
                         help='Load the model to test the result')
     parser.add_argument('--custom_patient_list', '-clist', type=str, default='predictList.txt', help='Input path to txt file with patient names to be used.')
     parser.add_argument('--epoch_number', '-enum', type=str, default='30', help='Input epoch number to be used for prediction.')
@@ -49,7 +49,7 @@ def to_numpy(*argv):
     params = []
     for arg in argv:
         if isinstance(arg, dict):  # Check if the argument is a dictionary
-            converted_dict = {key: to_numpy(value) for key, value in arg.items()}
+            converted_dict = {key: to_numpy(value)[0] for key, value in arg.items()}
             params.append(converted_dict)
         else:
             # Ensure that the argument is a tensor
@@ -187,7 +187,7 @@ if __name__ == '__main__':
                         loss = criterion(M, images)
                         loss_np = np.array(loss.item())
                         M_np,param_dict_np = to_numpy(M, param_dict)
-                        results.update(param_dict)
+                        results.update(param_dict_np)
                         results.update({'M':M_np,'loss': loss_np})
                         pbar.update(images.shape[0])
                         save_params(result_dict= results, model_folder = model_name,fitting_folder  =fitting_name,patient_folder = patient, run_number = run_number,file_name = file_name )
