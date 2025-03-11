@@ -45,6 +45,7 @@ class Atten_Unet(nn.Module):
         self.dbconv4 = DoubleConv(128, 64)
    
         self.outc = OutConv(64, self.n_classes)
+        self.sigma_relu = torch.nn.Softplus()
 
 
 
@@ -86,10 +87,11 @@ class Atten_Unet(nn.Module):
             # sigma = logits[:, 3:4, :, :]
             if self.input_sigma:
                 sigma_final = sigma_true
-            else:
-                sigma_final = logits[:, 3:4, :, :]
+                sigma_final[sigma_final == 0.] = 1e-8
 
-            sigma_final[sigma_final == 0.] = 1e-8
+            else:
+                sigma_final = sigmoid_cons(logits[:, 3:4, :, :],0.001,1)
+
             # make sure D1 is the larger value between D1 and D2
             if torch.mean(d_1) < torch.mean(d_2):
                 d_1, d_2 = d_2, d_1
@@ -103,6 +105,7 @@ class Atten_Unet(nn.Module):
             v = bio_exp(d_1, d_2, f, b)
 
             v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
+
             if self.rice:
                 res = rice_exp(v, sigma_final)
             else:
@@ -116,7 +119,7 @@ class Atten_Unet(nn.Module):
             if self.input_sigma:
                 sigma_final = sigma_true
             else:
-                sigma_final = logits[:, 2:3, :, :]
+                sigma_final = sigmoid_cons(logits[:, 2:3, :, :],1,10)
 
             sigma_final[sigma_final == 0.] = 1e-8
             # make sure D1 is the larger value between D1 and D2
@@ -140,7 +143,7 @@ class Atten_Unet(nn.Module):
             if self.input_sigma:
                 sigma_final = sigma_true
             else:
-                sigma_final = logits[:, 2:3, :, :]
+                sigma_final = self.sigma_relu(logits[:, 2:3, :, :])
 
             sigma_final[sigma_final == 0.] = 1e-8
             # make sure D1 is the larger value between D1 and D2

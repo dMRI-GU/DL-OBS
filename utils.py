@@ -24,8 +24,8 @@ class post_processing():
         """
         evlaute the performance of network 
         """
-        criterion = MS_SSIM(channel=20, win_size=5)
-        criterion2 = nn.MSELoss()#nn.L1Loss()#nn.MSELoss()
+        #criterion = MS_SSIM(channel=20, win_size=5)
+        criterion2 = nn.L1Loss()#nn.L1Loss()#nn.MSELoss()
         net.eval()
         val_losses = 0
 
@@ -41,14 +41,14 @@ class post_processing():
             M, param_dict = net(images,b,image_b0, sigma, scale_factor)
             M = M * scale_factor.view(-1, 1, 1, 1)
             images = images * scale_factor.view(-1, 1, 1, 1)
-            criterion.data_range = torch.max(images)
-            ssim_loss = 1-criterion(M, images)
+            #criterion.data_range = torch.max(images)
+            #ssim_loss = 1-criterion(M, images)
             mse_loss = criterion2(M,images)
-            loss = ssim_loss * mse_loss  #+ssim_loss
+            loss = mse_loss#ssim_loss * mse_loss  #+ssim_loss
             loss_value = torch.tensor(loss.item())
 
             for key, res in param_dict.items():
-                if key == 'sigma': continue
+                #if key == 'sigma': continue
                 res = res.cpu().detach().numpy()
                 res = res[(0,) * (res.ndim - 2)]
                 res_min = np.min(res)
@@ -72,7 +72,8 @@ class patientDataset(Dataset):
     '''
     wrap the patient numpy data to be dealt by the dataloader
     '''
-    def __init__(self, data_dir, input_sigma: bool, transform=None, normalize = True, custom_list = None, crop=True):
+
+    def __init__(self, data_dir, input_sigma: bool, transform=None, normalize = True, custom_list = None, crop=True, model_unetr = False):
         super(Dataset).__init__()
         self.data_dir = data_dir
         self.transform = transform
@@ -80,6 +81,7 @@ class patientDataset(Dataset):
         self.num_direction = 3
         self.input_sigma = input_sigma
         self.crop = crop
+        self.model_unetr = model_unetr
 
         # Must not include ToTensor()!
         if custom_list is not None:
@@ -216,7 +218,8 @@ class patientDataset(Dataset):
         """
         (20, H, W)
         """
-        return images[:, 20:-20, :]
+        if self.model_unetr: return images[:, 16:-16, :]
+        else: return images[:, 20:-20, :]
 
 
 def init_weights(model):

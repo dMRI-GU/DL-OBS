@@ -1,5 +1,4 @@
 from pytorch_msssim import MS_SSIM
-
 from model.unet_model import UNet
 from model.attention_unet import Atten_Unet
 from model.res_attention_unet import Res_Atten_Unet
@@ -15,7 +14,7 @@ import wandb
 import torch.nn as nn
 from tqdm import tqdm
 from IPython import embed
-result_path = Path('../results/L2loss/')
+result_path = Path('../results/L1loss_ssim/')
 
 class CustomLoss(nn.Module):
     def __init__(self):
@@ -34,11 +33,12 @@ class CustomLoss(nn.Module):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--load', '-f', type=str, default='../checkpoints/cross_validation_l2',
+    parser.add_argument('--load', '-f', type=str, default='../checkpoints/cross_validation_l1_ssim',
                         help='Load the model to test the result')
     parser.add_argument('--custom_patient_list', '-clist', type=str, default='predictList.txt', help='Input path to txt file with patient names to be used.')
     parser.add_argument('--epoch_number', '-enum', type=str, default='30', help='Input epoch number to be used for prediction.')
-
+    parser.add_argument('--rice', '-rice', action='store_true',help='Use this flag if you want to add Rician bias')
+    parser.add_argument('--filter', '-filter',  type=str, default='', help='Filter models to predict, for example -filter attention_unte.')
 
     return parser.parse_args()
 
@@ -61,7 +61,11 @@ def save_params(result_dict,model_folder: str,fitting_folder: str ,patient_folde
     """
     save the parameters maps and M as numpy array
     """
-    complete_path = os.path.join(result_path,model_folder,fitting_folder,patient_folder.split('_')[0],run_number)
+    if args.rice:
+        model_name_add = '_rician'
+    else:
+        model_name_add = ''
+    complete_path = os.path.join(result_path,model_folder+model_name_add,fitting_folder,patient_folder.split('_')[0],run_number)
     Path(complete_path).mkdir(parents=True, exist_ok=True)
     for key, res in result_dict.items():
         if torch.is_tensor(res):
@@ -126,7 +130,7 @@ if __name__ == '__main__':
     # Example usage:
     folder_path = args.load
     indexed_files = index_files(folder_path)
-    indexed_files = [f for f in indexed_files if args.epoch_number in f]
+    indexed_files = [f for f in indexed_files if args.epoch_number in f and args.filter in f]
     for patient in predict_list:
         print(f'Running model for patient: {patient}::\n\n')
         for i,pth_file in enumerate(indexed_files):
@@ -143,16 +147,16 @@ if __name__ == '__main__':
             b = b.reshape(1, len(b), 1, 1)
             # Load the UNet model
             if model_name == 'attention_unet':
-                net = Atten_Unet(n_channels=20, rice=False, bilinear=False, input_sigma=True, fitting_model=fitting_name)
+                net = Atten_Unet(n_channels=20, rice=args.rice, bilinear=False, input_sigma=True, fitting_model=fitting_name)
 
             elif model_name == 'unet':
-                net = UNet(n_channels=20, rice=False, bilinear=False, input_sigma=True,fitting_model=fitting_name)
+                net = UNet(n_channels=20, rice=args.rice, bilinear=False, input_sigma=True,fitting_model=fitting_name)
             elif model_name == 'res_atten_unet':
-                net = Res_Atten_Unet(n_channels=20, rice=False, bilinear=False, input_sigma=True, fitting_model=fitting_name)
+                net = Res_Atten_Unet(n_channels=20, rice=args.rice, bilinear=False, input_sigma=True, fitting_model=fitting_name)
 
 
-            #net = UNet(n_channels=20, b=b, rice=False, bilinear=False)
-            #net = Res_Atten_Unet(n_channels=20, b=b, rice=False, bilinear=False)
+            #net = UNet(n_channels=20, b=b, rice=args.rice, bilinear=False)
+            #net = Res_Atten_Unet(n_channels=20, b=b, rice=args.rice, bilinear=False)
 
             #net = nn.DataParallel(net)
             checkpoint = torch.load(indexed_files[i], map_location=device, weights_only=True)

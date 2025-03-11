@@ -38,6 +38,7 @@ class UNet(nn.Module):
         self.up3 = Up(256, 128 // factor, bilinear)
         self.up4 = Up(128, 64, bilinear)
         self.outc = OutConv(64, self.n_classes)
+        self.sigma_relu = nn.ReLU(inplace=True)
 
     def forward(self, x,b,b0,sigma_true, scale_factor):
         x1 = self.inc(x)
@@ -61,7 +62,7 @@ class UNet(nn.Module):
             if self.input_sigma:
                 sigma_final = sigma_true
             else:
-                sigma_final = logits[:, 3:4, :, :]
+                sigma_final = self.sigma_relu(logits[:, 3:4, :, :])
 
             sigma_final[sigma_final == 0.] = 1e-8
             # make sure D1 is the larger value between D1 and D2
@@ -90,7 +91,7 @@ class UNet(nn.Module):
             if self.input_sigma:
                 sigma_final = sigma_true
             else:
-                sigma_final = logits[:, 2:3, :, :]
+                sigma_final = self.sigma_relu(logits[:, 2:3, :, :])
 
             sigma_final[sigma_final == 0.] = 1e-8
             # make sure D1 is the larger value between D1 and D2
@@ -112,7 +113,7 @@ class UNet(nn.Module):
             if self.input_sigma:
                 sigma_final = sigma_true
             else:
-                sigma_final = logits[:, 2:3, :, :]
+                sigma_final = self.sigma_relu(logits[:, 2:3, :, :])
 
             sigma_final[sigma_final == 0.] = 1e-8
             # make sure D1 is the larger value between D1 and D2

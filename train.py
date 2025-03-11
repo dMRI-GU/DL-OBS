@@ -4,14 +4,16 @@ from torch.utils.data import DataLoader, random_split
 from model.res_attention_unet import Res_Atten_Unet
 from utils import post_processing, patientDataset, init_weights
 from model.unet_MultiDecoder import UNet_MultiDecoders
+from model.UNETR import UNETR
+from IPython import embed
 from model.attention_unet import Atten_Unet
 from model.unet_model import UNet
+from model.unet_2Decoder import UNet_2Decoders
 from pathlib import Path
 import logging
 import wandb
 import argparse
 import torch
-from IPython import embed
 import numpy as np
 from pytorch_msssim import MS_SSIM
 import torch.distributed as dist
@@ -21,7 +23,7 @@ import torch.multiprocessing as mp
 import os
 
 #Directory for net models to be saved at as .pth files
-dir_checkpoint = Path('../checkpoints/cross_validation_l2')
+dir_checkpoint = Path('../checkpoints')
 
 
 def setup(rank, world_size):
@@ -59,14 +61,14 @@ class CustomLoss(nn.Module):
 
     def __init__(self):
         super(CustomLoss, self).__init__()
-        self.ssim_loss = MS_SSIM(channel=20,win_size=5)
-        self.mse_loss =  nn.MSELoss()#nn.L1Loss()
+        #self.ssim_loss = MS_SSIM(channel=20,win_size=5)
+        self.mse_loss =  nn.L1Loss()#nn.MSELoss()
     def update_data_range(self, range):
         self.ssim_loss.data_range = range
     def forward(self, M,images):
-        loss_ssim = 1 - self.ssim_loss(M, images)
+        #loss_ssim = 1 - self.ssim_loss(M, images)
         loss_mse = self.mse_loss(M, images)
-        return loss_ssim * loss_mse
+        return loss_mse#loss_ssim * loss_mse
 
 def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str, fitting_model: str,run_number: str, world_size=None,rank = None,device = None,  epochs: int=30, batch_size: int=1, learning_rate: float = 1e-3,
     val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False):
@@ -181,7 +183,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
         world_size=1#Function runs by one GPU
 
     post_process= post_processing()#Module used for validation of network during training
-
+    embed()
     for epoch in range(1, epochs+1):
         net.train()
         avg_loss = 0
@@ -226,7 +228,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                 #Rescale output and input images, as they were normalized in dataset.
                 M = M*scale_factor.view(-1,1,1,1)
                 images = images*scale_factor.view(-1,1,1,1)
-                criterion.update_data_range(torch.max(images))
+                #criterion.update_data_range(torch.max(images))
 
                 loss = criterion(M,images)
                 loss.backward()
@@ -263,7 +265,6 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                 with torch.no_grad():
                     val_loss, params, M, img,sig = post_process.evaluate(val_loader, net, rank, b, input_sigma=input_sigma)
                 scheduler.step(val_loss)
-
                 logging.info('Validation Loss: {}'.format(val_loss))
                 logging_dict = {'learning rate': optimizer.param_groups[0]['lr'],
                             'validation Loss': val_loss,
@@ -282,14 +283,14 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
 
         # save the model for the current epoch
-        if rank==0 and save_checkpoint and not os.getenv("WANDB_SWEEP_ID") and epoch%5==0 and epoch>19:#save every 5 epoch
+        if rank==0 and save_checkpoint and not os.getenv("WANDB_SWEEP_ID") and epoch%5==0 and epoch>29:#save every 5 epoch
             save_path  = Path(os.path.join(dir_checkpoint,args.main_folder,training_model,fitting_model))
             save_path.mkdir(parents=True, exist_ok=True)
-            torch.save(net.state_dict(), str(save_path / f'checkpoint_epoch{epoch}.pth'))
+            torch.save(net.state_dict(), str(save_path / f'checkpoint_epoch{epoch}_{experiment.id}.pth'))
             logging.info(f'Sweep run (Batch_size {batch_size} num_epochs {epochs} lr {learning_rate:.4f}) saved!')
 
-        elif sweeping and save_checkpoint and  os.getenv("WANDB_SWEEP_ID") and epoch%5==0 and epoch>19:
-            save_path = Path(os.path.join(dir_checkpoint,training_model,fitting_model,f'run_{run_number}'))
+        elif sweeping and save_checkpoint and  os.getenv("WANDB_SWEEP_ID") and epoch%5==0 and epoch>29:
+            save_path = Path(os.path.join(dir_checkpoint,args.main_folder,training_model,fitting_model,f'run_{run_number}'))
             Path(save_path).mkdir(parents=True, exist_ok=True)
             torch.save(net.state_dict(), str(save_path / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
@@ -316,10 +317,11 @@ def get_args():
     parser.add_argument('--parallel_training', '-parallel', action='store_true', help='Use argument for parallel training with multiple GPUs.')
     parser.add_argument('--sweep', '-sweep', action='store_true', help='Use this flag if you want to run hyper parameter tuning')
     parser.add_argument('--custom_patient_list', '-clist', type=str, help='Input path to txt file with patient names to be used.')#default='new_patientList.txt'
-    parser.add_argument('--input_sigma', '-s', default=True, help='Use argument if sigma map is used as input.')
+    parser.add_argument('--input_sigma', '-s', action='store_true', help='Use argument if sigma map is used as input.')
     parser.add_argument('--training_model', '-trn', default='attention_unet',help='Specify which training model to use. Choose between ...,...,...')
     parser.add_argument('--fitting_model', '-fit', default='biexp', help='Specify which fitting model to use')
     parser.add_argument('--run_number', '-rnum', default='1', help='This argument is used by sweep_train.py')
+    parser.add_argument('--main_folder', '-folder', default='cross_validation_l1', help='Specify main folder name')
 
 
     return parser.parse_args()
@@ -334,7 +336,8 @@ def main(rank,world_size ,sweep):
         torch.cuda.manual_seed_all(42)
     args = get_args()
     data_dir = args.patientData
-
+    if args.training_model == 'unetr': model_unetr= True#Required special dimensions for input data (208,240) or (240,240)
+    else: model_unetr = False
     #If a select number of patients are used for training and not all patients in data_dir
     if args.custom_patient_list:
         with open(args.custom_patient_list, 'r') as file:
@@ -342,10 +345,10 @@ def main(rank,world_size ,sweep):
             content = file.read().strip()  # Remove leading/trailing whitespace (if any)
             patient_list = content.split(',')
         #Dataset containing patients from the custom list only
-        patientData = patientDataset(data_dir,input_sigma=args.input_sigma,  custom_list=patient_list, transform=False, crop = False)
+        patientData = patientDataset(data_dir,input_sigma=args.input_sigma,  custom_list=patient_list, transform=False, crop = True,model_unetr =  model_unetr)
     else:
         #Dataset containing all patients in data_dir
-        patientData = patientDataset(data_dir,input_sigma=args.input_sigma, transform=False, crop = False)
+        patientData = patientDataset(data_dir,input_sigma=args.input_sigma, transform=False, crop = True,model_unetr =  model_unetr)
 
     if rank ==0:
         #Log by one GPU (with ID = 0) only
@@ -365,28 +368,49 @@ def main(rank,world_size ,sweep):
     elif args.training_model == 'res_atten_unet':
         n_mess = "res_atten_unet"
         net = Res_Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
+    elif args.training_model == 'unet_2decoder':
+        n_mess = "unet_2decoder"
+        net = UNet_2Decoders(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
+    elif args.training_model == 'unetr':
+        n_mess = "unetr"
+
+        img_size_x = 240
+        img_size_y = 208
+        patch_size = 16
+        in_channels = 20
+        embed_dim = in_channels * (patch_size) ** 2
+        num_heads = 8
+        mlp_ratio = 2
+        base_filter = 32 #64 #32 #16
+        num_layers = 8
+
+
+        net = UNETR(img_size_x, img_size_y, patch_size, in_channels, base_filter, embed_dim, num_heads, num_layers,
+                      mlp_ratio,rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
     if rank == 0:
         print("Using ", torch.cuda.device_count(), " GPUs!\n")
         logging.info(f'Network:\n'
                      f'\t{n_mess}\n'
                      f'\t{net.n_channels} input channels\n'
                      f'\t{"Bilinear" if net.bilinear else "Transposed conv"} upscaling')
-    if args.load:
 
-        if rank == 0: logging.info(f'Model loaded from {args.load}')
-        net.load_state_dict(torch.load(args.load))
-
-    net.apply(init_weights)#Weights initialization
     if not sweep:
         # During a sweep (hyperparameter tuning) each wandb.agent is assigned one GPU (different processes/network are trained in parallel on different GPUs).
         # Each GPU will need the whole dataset, as they don't share networks.
         # Thus, no sampling/distribution of data will be done between GPUs as done in parallel training for one network.
 
-        #During a normal training (no sweep), every GPU trains the same network and can be trained in parallel
-        #The dataset can be partitioned and distributed to each GPU, were each GPU processes their assigned data through the forward pass of network
-        #Weights on each GPU is synchronised and resulted gradient calculations are shared between GPUs.
-        #Hence, DistributedDataParallel is used to achieve this and train in parallel
+        # During a normal training (no sweep), every GPU trains the same network and can be trained in parallel
+        # The dataset can be partitioned and distributed to each GPU, were each GPU processes their assigned data through the forward pass of network
+        # Weights on each GPU is synchronised and resulted gradient calculations are shared between GPUs.
+        # Hence, DistributedDataParallel is used to achieve this and train in parallel
         net = nn.parallel.DistributedDataParallel(net, device_ids=[rank])
+    if args.load:
+
+        if rank == 0: logging.info(f'Model loaded from {args.load}')
+        net.load_state_dict(torch.load(args.load))
+    else:
+        net.apply(init_weights)#Weights initialization
+
 
     device = None
 

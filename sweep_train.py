@@ -13,6 +13,9 @@ sweep_config = {
         'learning_rate': {
             'values': [0.0008]
         },
+        'input_sigma': {
+            'values': [True]
+        },
         'batch_size': {
             'values': [30]
         },
