@@ -38,7 +38,7 @@ class UNet(nn.Module):
         self.up3 = Up(256, 128 // factor, bilinear)
         self.up4 = Up(128, 64, bilinear)
         self.outc = OutConv(64, self.n_classes)
-        self.sigma_relu = nn.ReLU(inplace=True)
+        self.sigma_scale = nn.Parameter(torch.tensor(1.0, requires_grad=True))
 
     def forward(self, x,b,b0,sigma_true, scale_factor):
         x1 = self.inc(x)
@@ -60,9 +60,12 @@ class UNet(nn.Module):
             f = logits[:, 2:3, :, :]
             # sigma = logits[:, 3:4, :, :]
             if self.input_sigma:
-                sigma_final = sigma_true
+                sigma_true[sigma_true == 0.] = 1e-8
+                sigma_scale = self.sigma_scale.to(device=d_1.device)
+                sigma_scale = F.relu(sigma_scale)
+                sigma_final = sigma_true * sigma_scale
             else:
-                sigma_final = self.sigma_relu(logits[:, 3:4, :, :])
+                sigma_final = sigmoid_cons(logits[:, 3:4, :, :],0.001,1)
 
             sigma_final[sigma_final == 0.] = 1e-8
             # make sure D1 is the larger value between D1 and D2
@@ -89,9 +92,12 @@ class UNet(nn.Module):
             d = logits[:, 0:1, :, :]
             k = logits[:, 1:2, :, :]
             if self.input_sigma:
-                sigma_final = sigma_true
+                sigma_true[sigma_true == 0.] = 1e-8
+                sigma_scale = self.sigma_scale.to(device=d.device)
+                sigma_scale = F.relu(sigma_scale)
+                sigma_final = sigma_true * sigma_scale
             else:
-                sigma_final = self.sigma_relu(logits[:, 2:3, :, :])
+                sigma_final = sigmoid_cons(logits[:, 2:3, :, :],0.001,1)
 
             sigma_final[sigma_final == 0.] = 1e-8
             # make sure D1 is the larger value between D1 and D2
@@ -111,9 +117,12 @@ class UNet(nn.Module):
             theta = logits[:, 0:1, :, :]
             k = logits[:, 1:2, :, :]
             if self.input_sigma:
-                sigma_final = sigma_true
+                sigma_true[sigma_true == 0.] = 1e-8
+                sigma_scale = self.sigma_scale.to(device=k.device)
+                sigma_scale = F.relu(sigma_scale)
+                sigma_final = sigma_true * sigma_scale
             else:
-                sigma_final = self.sigma_relu(logits[:, 2:3, :, :])
+                sigma_final = sigmoid_cons(logits[:, 2:3, :, :],0.001,1)
 
             sigma_final[sigma_final == 0.] = 1e-8
             # make sure D1 is the larger value between D1 and D2

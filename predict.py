@@ -14,7 +14,7 @@ import wandb
 import torch.nn as nn
 from tqdm import tqdm
 from IPython import embed
-result_path = Path('../results/L1loss_ssim/')
+result_path = Path('../results/1_run_adc_loss_no_ssim_with_relu/')
 
 class CustomLoss(nn.Module):
     def __init__(self):
@@ -33,12 +33,13 @@ class CustomLoss(nn.Module):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--load', '-f', type=str, default='../checkpoints/cross_validation_l1_ssim',
+    parser.add_argument('--load', '-f', type=str, default='../checkpoints/Testing',
                         help='Load the model to test the result')
     parser.add_argument('--custom_patient_list', '-clist', type=str, default='predictList.txt', help='Input path to txt file with patient names to be used.')
     parser.add_argument('--epoch_number', '-enum', type=str, default='30', help='Input epoch number to be used for prediction.')
     parser.add_argument('--rice', '-rice', action='store_true',help='Use this flag if you want to add Rician bias')
     parser.add_argument('--filter', '-filter',  type=str, default='', help='Filter models to predict, for example -filter attention_unte.')
+    parser.add_argument('--test_data_directory', '-dir',  type=str, default='/m2_data/mustafa/nonTrainData/', help='Path to the test data.')
 
     return parser.parse_args()
 
@@ -125,7 +126,7 @@ if __name__ == '__main__':
             content = file.read().strip()  # Remove leading/trailing whitespace (if any)
             predict_list = content.split(',')
 
-    test_dir = '/m2_data/mustafa/nonTrainData/'
+    test_dir = args.test_data_directory
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     # Example usage:
     folder_path = args.load

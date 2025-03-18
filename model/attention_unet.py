@@ -45,7 +45,7 @@ class Atten_Unet(nn.Module):
         self.dbconv4 = DoubleConv(128, 64)
    
         self.outc = OutConv(64, self.n_classes)
-        self.sigma_relu = torch.nn.Softplus()
+        self.sigma_scale = nn.Parameter(torch.tensor(1.0, requires_grad=True))
 
 
 
@@ -86,8 +86,11 @@ class Atten_Unet(nn.Module):
             f = logits[:, 2:3, :, :]
             # sigma = logits[:, 3:4, :, :]
             if self.input_sigma:
-                sigma_final = sigma_true
-                sigma_final[sigma_final == 0.] = 1e-8
+                sigma_true[sigma_true == 0.] = 1e-8
+                sigma_scale = self.sigma_scale.to(device=d_1.device)
+                sigma_scale = F.relu(sigma_scale)
+                sigma_final = sigma_true* sigma_scale
+
 
             else:
                 sigma_final = sigmoid_cons(logits[:, 3:4, :, :],0.001,1)
@@ -107,9 +110,10 @@ class Atten_Unet(nn.Module):
             v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
 
             if self.rice:
-                res = rice_exp(v, sigma_final)
+                res =  F.relu(rice_exp(v, sigma_final)) +  1 / scale_factor.view(-1, 1, 1, 1)
             else:
-                res = v
+                res = F.relu(v) +  1 / scale_factor.view(-1, 1, 1, 1)
+
             return res, {'d1':d_1,'d2': d_2,'f': f,'sigma': sigma_final*scale_factor.view(-1, 1, 1, 1)}
 
         elif self.fitting_model == 'kurtosis':
@@ -117,9 +121,12 @@ class Atten_Unet(nn.Module):
             d = logits[:, 0:1, :, :]
             k = logits[:, 1:2, :, :]
             if self.input_sigma:
-                sigma_final = sigma_true
+                sigma_true[sigma_true == 0.] = 1e-8
+                sigma_scale = self.sigma_scale.to(device=d.device)
+                sigma_scale = F.relu(sigma_scale)
+                sigma_final = sigma_true * sigma_scale
             else:
-                sigma_final = sigmoid_cons(logits[:, 2:3, :, :],1,10)
+                sigma_final = sigmoid_cons(logits[:, 2:3, :, :],0.001,1)
 
             sigma_final[sigma_final == 0.] = 1e-8
             # make sure D1 is the larger value between D1 and D2
@@ -141,9 +148,12 @@ class Atten_Unet(nn.Module):
             theta = logits[:, 0:1, :, :]
             k = logits[:, 1:2, :, :]
             if self.input_sigma:
-                sigma_final = sigma_true
+                sigma_true[sigma_true == 0.] = 1e-8
+                sigma_scale = self.sigma_scale.to(device=k.device)
+                sigma_scale = F.relu(sigma_scale)
+                sigma_final = sigma_true * sigma_scale
             else:
-                sigma_final = self.sigma_relu(logits[:, 2:3, :, :])
+                sigma_final = sigmoid_cons(logits[:, 2:3, :, :],0.001,1)
 
             sigma_final[sigma_final == 0.] = 1e-8
             # make sure D1 is the larger value between D1 and D2

@@ -13,19 +13,52 @@ from IPython import embed
 from pytorch_msssim import MS_SSIM
 
 
+class CustomLoss(nn.Module):
+
+    """
+    Custom loss function: :math:`L` = (1-SSIM) :math:`\cdot` MSEloss
+
+    Example:
+
+        >>>loss = CustomLoss()
+
+        >>>loss_value = loss(predicted,target)
+    """
+
+    def __init__(self):
+        super(CustomLoss, self).__init__()
+        self.ssim_loss = MS_SSIM(channel=1, win_size=5)
+        self.ssim_loss2 = MS_SSIM(channel=20, win_size=5)
+        self.mse_loss =  nn.L1Loss()#nn.MSELoss()
+    def update_data_range(self, range):
+        self.ssim_loss.data_range = range
+    def forward(self, M,images, ssim_bool = False, only_ssim = False):
+        if M.shape[1]>1 and ssim_bool:
+            loss_ssim = 1 - self.ssim_loss2(M, images)
+        elif ssim_bool:
+            loss_ssim = 1 - self.ssim_loss(M, images)
+        else:
+            loss_ssim = 1
+
+        if not only_ssim:
+            loss_mse = self.mse_loss(M, images)
+        else:
+            loss_mse = 1
+        return loss_ssim * loss_mse
+
 class post_processing():
     """
     This class include the post processing function to evaluate the trained model
     """
     def __init__(self):
         super().__init__()
-    
-    def evaluate(self, val_loader, net, rank, b, input_sigma: bool):
+
+    def evaluate(self, val_loader, net, rank, b, input_sigma: bool, ADC_loss):
         """
         evlaute the performance of network 
         """
         #criterion = MS_SSIM(channel=20, win_size=5)
-        criterion2 = nn.L1Loss()#nn.L1Loss()#nn.MSELoss()
+        criterion = CustomLoss()#nn.L1Loss()#nn.MSELoss()
         net.eval()
         val_losses = 0
 
@@ -41,10 +74,38 @@ class post_processing():
             M, param_dict = net(images,b,image_b0, sigma, scale_factor)
             M = M * scale_factor.view(-1, 1, 1, 1)
             images = images * scale_factor.view(-1, 1, 1, 1)
+
+            if ADC_loss:
+                im100 = images[:, 0]
+                im1000 = images[:, 9]
+                im100[im100 < 1] = 1
+                im1000[im1000 < 1] = 1
+                ADC_images = -torch.log(im1000 / im100) / (1000 - 100)
+
+                M100 = M[:, 0]
+                M1000 = M[:, 9]
+                M100[M100 < 1] = 1
+                M1000[M1000 < 1] = 1
+                ADC_M = -torch.log(M1000 / M100) / (1000 - 100)
+
             #criterion.data_range = torch.max(images)
             #ssim_loss = 1-criterion(M, images)
-            mse_loss = criterion2(M,images)
-            loss = mse_loss#ssim_loss * mse_loss  #+ssim_loss
+
+            if ADC_loss:
+                #criterion.update_data_range(torch.max(ADC_images))
+                loss = criterion(ADC_M.unsqueeze(dim=1), ADC_images.unsqueeze(dim=1),  ssim_bool=False)
+                #criterion.update_data_range(torch.max(images))
+                loss += criterion(M, images,  ssim_bool=False)
+                #criterion.update_data_range(torch.max(images[:, 0:1]))
+                #loss *= criterion(M[:, 0:1], images[:, 0:1], ssim_bool=True, only_ssim=True)
+
+            else:
+                criterion.update_data_range(torch.max(images))
+                loss = criterion(M, images)
+
+
+
+
             loss_value = torch.tensor(loss.item())
 
             for key, res in param_dict.items():
@@ -66,7 +127,7 @@ class post_processing():
 
             val_losses += loss_value
 
-        return val_losses/len(val_loader), log_dict, M[0, 0, :, :], images[0, 0, :, :], final_sigma
+        return val_losses/len(val_loader), log_dict, M[0, 9, :, :], images[0, 9, :, :], final_sigma
 
 class patientDataset(Dataset):
     '''
@@ -89,7 +150,7 @@ class patientDataset(Dataset):
         else:
             self.patients = os.listdir(data_dir)
         self.data = self.load_npz_files_from_dir(data_directory= self.data_dir,patient_list=  self.patients)
-
+        print(len(self.data))
         self.normalize = normalize
         self.names = self.pat_names()
 
@@ -164,8 +225,11 @@ class patientDataset(Dataset):
         image_data = torch.from_numpy(image_data)  # torch.tensor(image_data,dtype=torch.float32)
         image_b0 = torch.from_numpy(image_b0)  # torch.tensor(image_b0, dtype=torch.float32)
 
+
+
+
         if input_sigma:
-            sigma = data[2][idx, :, :, 10]#data['result_3Dsig'][idx, :, :, 10]
+            sigma = data[2][idx, :, :, -2]#data['result_3Dsig'][idx, :, :, 10]
             sigma = sigma.astype('float32')
             sigma = torch.from_numpy(sigma)  # torch.tensor(sigma, dtype=torch.float32)
         else:
@@ -181,6 +245,8 @@ class patientDataset(Dataset):
 
         else:
             print('ERROR: dir index is not 0,1 or 2')
+
+
 
         # if normalize:
         #    image_b0[image_b0 == 0] = 1

@@ -61,14 +61,24 @@ class CustomLoss(nn.Module):
 
     def __init__(self):
         super(CustomLoss, self).__init__()
-        #self.ssim_loss = MS_SSIM(channel=20,win_size=5)
+        self.ssim_loss = MS_SSIM(channel=1, win_size=5)
+        self.ssim_loss2 = MS_SSIM(channel=20, win_size=5)
         self.mse_loss =  nn.L1Loss()#nn.MSELoss()
     def update_data_range(self, range):
         self.ssim_loss.data_range = range
-    def forward(self, M,images):
-        #loss_ssim = 1 - self.ssim_loss(M, images)
-        loss_mse = self.mse_loss(M, images)
-        return loss_mse#loss_ssim * loss_mse
+    def forward(self, M,images, ssim_bool = False, only_ssim = False):
+        if M.shape[1]>1 and ssim_bool:
+            loss_ssim = 1 - self.ssim_loss2(M, images)
+        elif ssim_bool:
+            loss_ssim = 1 - self.ssim_loss(M, images)
+        else:
+            loss_ssim = 1
+
+        if not only_ssim:
+            loss_mse = self.mse_loss(M, images)
+        else:
+            loss_mse = 1
+        return loss_ssim * loss_mse
 
 def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str, fitting_model: str,run_number: str, world_size=None,rank = None,device = None,  epochs: int=30, batch_size: int=1, learning_rate: float = 1e-3,
     val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False):
@@ -119,7 +129,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
     """
 
     args = get_args()#Getting arguments passed from CLI through ArgumentParser.
-
+    ADC_loss = args.adc_as_loss
     b = b.reshape(1, len(b), 1, 1)#Reshaped to match dimension of data (num_slices, num_diffusion_levels, width, height)
 
     # split into training and validation set
@@ -168,7 +178,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 ''')
 
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=4)
     
     criterion = CustomLoss()
     global_step = 0
@@ -183,7 +193,6 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
         world_size=1#Function runs by one GPU
 
     post_process= post_processing()#Module used for validation of network during training
-    embed()
     for epoch in range(1, epochs+1):
         net.train()
         avg_loss = 0
@@ -228,9 +237,34 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                 #Rescale output and input images, as they were normalized in dataset.
                 M = M*scale_factor.view(-1,1,1,1)
                 images = images*scale_factor.view(-1,1,1,1)
-                #criterion.update_data_range(torch.max(images))
 
-                loss = criterion(M,images)
+                if ADC_loss:
+                    im100 = images[:,0]
+                    im1000 = images[:,9]
+                    im100[im100<1] = 1
+                    im1000[im1000<1] = 1
+                    ADC_images = -torch.log(im1000 / im100) / (1000 -100)
+
+                    M100 = M[:, 0]
+                    M1000 = M[:, 9]
+                    M100[M100 < 1] = 1
+                    M1000[M1000 < 1] = 1
+                    ADC_M = -torch.log(M1000 / M100) / (1000 - 100)
+
+
+                ADC_loss_val = 1
+                if ADC_loss:
+                    #criterion.update_data_range(torch.max(ADC_images))
+                    loss = criterion(ADC_M.unsqueeze(dim=1), ADC_images.unsqueeze(dim=1), ssim_bool=False)
+                    ADC_loss_val = loss.item()
+                    #criterion.update_data_range(torch.max(images))
+                    loss += criterion(M, images,  ssim_bool=False)
+                    # criterion.update_data_range(torch.max(images[:, 0:1]))
+                    # loss *= criterion(M[:, 0:1], images[:, 0:1], ssim_bool=True, only_ssim=True)
+
+                else:
+                    criterion.update_data_range(torch.max(images))
+                    loss = criterion(M,images)
                 loss.backward()
 
                 #Maximum gradient before clipping
@@ -251,6 +285,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                     #Log by one GPU
                     experiment.log({
                         'train loss': loss.item(),
+                        'ADC_loss': ADC_loss_val,
                         'max gradient before clipping': max_grad_before,
                         'step': global_step,
                         'epoch': epoch
@@ -263,7 +298,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
             if rank == 0 or sweeping:
                 with torch.no_grad():
-                    val_loss, params, M, img,sig = post_process.evaluate(val_loader, net, rank, b, input_sigma=input_sigma)
+                    val_loss, params, M, img,sig = post_process.evaluate(val_loader, net, rank, b, input_sigma=input_sigma, ADC_loss= ADC_loss)
                 scheduler.step(val_loss)
                 logging.info('Validation Loss: {}'.format(val_loss))
                 logging_dict = {'learning rate': optimizer.param_groups[0]['lr'],
@@ -273,6 +308,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                             'max Image': img.cpu().max(),
                             'min Image': img.cpu().min(),
                             'sigma_true' if input_sigma else 'predicted_sigma': wandb.Image(sig.cpu()),
+                            'sigma_scale': net.sigma_scale.item() if os.getenv("WANDB_SWEEP_ID") else net.module.sigma_scale.item(),
                             'M': wandb.Image(M.cpu()),
                             'image': wandb.Image(img.cpu()),
                             'epoch': epoch,
@@ -315,13 +351,14 @@ def get_args():
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
     parser.add_argument('--parallel_training', '-parallel', action='store_true', help='Use argument for parallel training with multiple GPUs.')
-    parser.add_argument('--sweep', '-sweep', action='store_true', help='Use this flag if you want to run hyper parameter tuning')
+    parser.add_argument('--sweep type=str', '-sweep', action='store_true', help='Use this flag if you want to run hyper parameter tuning')
     parser.add_argument('--custom_patient_list', '-clist', type=str, help='Input path to txt file with patient names to be used.')#default='new_patientList.txt'
-    parser.add_argument('--input_sigma', '-s', action='store_true', help='Use argument if sigma map is used as input.')
+    parser.add_argument('--input_sigma', '-s',  type=str, help='Use argument if sigma map is used as input.')
     parser.add_argument('--training_model', '-trn', default='attention_unet',help='Specify which training model to use. Choose between ...,...,...')
     parser.add_argument('--fitting_model', '-fit', default='biexp', help='Specify which fitting model to use')
     parser.add_argument('--run_number', '-rnum', default='1', help='This argument is used by sweep_train.py')
     parser.add_argument('--main_folder', '-folder', default='cross_validation_l1', help='Specify main folder name')
+    parser.add_argument('--adc_as_loss', '-adc', type=str, help='Pass True if use ADC as loss function')#default='new_patientList.txt'
 
 
     return parser.parse_args()
