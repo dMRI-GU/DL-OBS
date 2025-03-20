@@ -29,12 +29,15 @@ class CustomLoss(nn.Module):
         super(CustomLoss, self).__init__()
         self.ssim_loss = MS_SSIM(channel=1, win_size=5)
         self.ssim_loss2 = MS_SSIM(channel=20, win_size=5)
+        self.ssim_loss3 = MS_SSIM(channel=60, win_size=5)
         self.mse_loss =  nn.L1Loss()#nn.MSELoss()
     def update_data_range(self, range):
         self.ssim_loss.data_range = range
     def forward(self, M,images, ssim_bool = False, only_ssim = False):
-        if M.shape[1]>1 and ssim_bool:
+        if M.shape[1]>1 and M.shape[1]<21 and ssim_bool:
             loss_ssim = 1 - self.ssim_loss2(M, images)
+        elif M.shape[1]>21 and ssim_bool:
+            loss_ssim = 1 - self.ssim_loss3(M, images)
         elif ssim_bool:
             loss_ssim = 1 - self.ssim_loss(M, images)
         else:
@@ -78,43 +81,45 @@ class post_processing():
             if ADC_loss:
                 im100 = images[:, 0]
                 im1000 = images[:, 9]
-                im100[im100 < 1] = 1
-                im1000[im1000 < 1] = 1
+                im100 = im100 + torch.tensor(0.0001, device=im100.device)
+                im1000 = im1000 + torch.tensor(0.0001, device=im100.device)
                 ADC_images = -torch.log(im1000 / im100) / (1000 - 100)
 
                 M100 = M[:, 0]
                 M1000 = M[:, 9]
-                M100[M100 < 1] = 1
-                M1000[M1000 < 1] = 1
+                M100 = M100 + torch.tensor(0.0001, device=im100.device)
+                M1000 = M1000 + torch.tensor(0.0001, device=im100.device)
                 ADC_M = -torch.log(M1000 / M100) / (1000 - 100)
 
             #criterion.data_range = torch.max(images)
             #ssim_loss = 1-criterion(M, images)
 
             if ADC_loss:
-                #criterion.update_data_range(torch.max(ADC_images))
-                loss = criterion(ADC_M.unsqueeze(dim=1), ADC_images.unsqueeze(dim=1),  ssim_bool=False)
-                #criterion.update_data_range(torch.max(images))
-                loss += criterion(M, images,  ssim_bool=False)
+                criterion.update_data_range(torch.max(ADC_images))
+                loss = 6*1000*criterion(ADC_M.unsqueeze(dim=1), ADC_images.unsqueeze(dim=1),  ssim_bool=False)
+                criterion.update_data_range(torch.max(images))
+                loss += criterion(M, images,  ssim_bool=True)
                 #criterion.update_data_range(torch.max(images[:, 0:1]))
                 #loss *= criterion(M[:, 0:1], images[:, 0:1], ssim_bool=True, only_ssim=True)
 
             else:
                 criterion.update_data_range(torch.max(images))
-                loss = criterion(M, images)
+                loss = criterion(M, images, ssim_bool = True)
 
 
 
 
             loss_value = torch.tensor(loss.item())
 
-            for key, res in param_dict.items():
-                #if key == 'sigma': continue
+            first_indices = [param_dict['names'].index(val) for val in dict.fromkeys(param_dict['names'])]
+
+            for inde in first_indices:
+                res = param_dict['parameters'][inde][0]
+                key = param_dict['names'][inde]
                 res = res.cpu().detach().numpy()
-                res = res[(0,) * (res.ndim - 2)]
                 res_min = np.min(res)
                 res_max = np.max(res)
-                log_dict.update({f'{key}': wandb.Image(res),
+                log_dict.update({f'{key}': wandb.Image(res/res_max),
                                  f'{key}_min': res_min,
                                  f'{key}_max': res_max,
                                  })
@@ -122,7 +127,7 @@ class post_processing():
             if input_sigma:
                 final_sigma = sigma[0,0,:,:]
             else:
-                final_sigma  =param_dict['sigma'][0,0,:,:]
+                final_sigma  =param_dict['sigma'][0,:,:]
 
 
             val_losses += loss_value
@@ -134,10 +139,11 @@ class patientDataset(Dataset):
     wrap the patient numpy data to be dealt by the dataloader
     '''
 
-    def __init__(self, data_dir, input_sigma: bool, transform=None, normalize = True, custom_list = None, crop=True, model_unetr = False):
+    def __init__(self, data_dir, input_sigma: bool,use_3D:bool, transform=None, normalize = True, custom_list = None, crop=True, model_unetr = False):
         super(Dataset).__init__()
         self.data_dir = data_dir
         self.transform = transform
+        self.use_3D = use_3D
         self.num_slices = 22
         self.num_direction = 3
         self.input_sigma = input_sigma
@@ -176,14 +182,14 @@ class patientDataset(Dataset):
         return data
     def __len__(self):
         """each data file consist of 22 slices"""
-        return len(self.patients)*self.num_slices*self.num_direction
+        return len(self.patients)*self.num_slices*self.num_direction if not self.use_3D else len(self.patients)*self.num_slices
     
     def __getitem__(self, idx):
         # each time read on sample
         if torch.is_tensor(idx):
             idx = idx.tolist()
         direction_indice = idx//(self.num_slices*len(self.patients))
-        pats_indice = idx // (self.num_slices*self.num_direction)
+        pats_indice = idx // (self.num_slices*self.num_direction) if not self.use_3D else idx // (self.num_slices)
         slice_indice = idx % self.num_slices
 
         #imgs,means,stds
@@ -234,17 +240,20 @@ class patientDataset(Dataset):
             sigma = torch.from_numpy(sigma)  # torch.tensor(sigma, dtype=torch.float32)
         else:
             sigma = torch.tensor([1])
-        if dir == 0:
 
-            image_data = image_data[0:20, :, :]
-        elif dir == 1:
-            image_data = image_data[20:40, :, :]
+        if not self.use_3D:
 
-        elif dir == 2:
-            image_data = image_data[40:60, :, :]
+            if dir == 0:
 
-        else:
-            print('ERROR: dir index is not 0,1 or 2')
+                image_data = image_data[0:20, :, :]
+            elif dir == 1:
+                image_data = image_data[20:40, :, :]
+
+            elif dir == 2:
+                image_data = image_data[40:60, :, :]
+
+            else:
+                print('ERROR: dir index is not 0,1 or 2')
 
 
 

@@ -63,12 +63,15 @@ class CustomLoss(nn.Module):
         super(CustomLoss, self).__init__()
         self.ssim_loss = MS_SSIM(channel=1, win_size=5)
         self.ssim_loss2 = MS_SSIM(channel=20, win_size=5)
+        self.ssim_loss3 = MS_SSIM(channel=60, win_size=5)
         self.mse_loss =  nn.L1Loss()#nn.MSELoss()
     def update_data_range(self, range):
         self.ssim_loss.data_range = range
     def forward(self, M,images, ssim_bool = False, only_ssim = False):
-        if M.shape[1]>1 and ssim_bool:
+        if M.shape[1]>1 and M.shape[1]<21 and ssim_bool:
             loss_ssim = 1 - self.ssim_loss2(M, images)
+        elif M.shape[1]>21 and ssim_bool:
+            loss_ssim = 1 - self.ssim_loss3(M, images)
         elif ssim_bool:
             loss_ssim = 1 - self.ssim_loss(M, images)
         else:
@@ -178,7 +181,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 ''')
 
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
     
     criterion = CustomLoss()
     global_step = 0
@@ -235,36 +238,47 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                 M, _ = net(images,b,image_b0, sigma,scale_factor)#returnes tuple (M:output_image, dictionary_of_predicted_parameter_values)
 
                 #Rescale output and input images, as they were normalized in dataset.
+
                 M = M*scale_factor.view(-1,1,1,1)
                 images = images*scale_factor.view(-1,1,1,1)
 
                 if ADC_loss:
-                    im100 = images[:,0]
-                    im1000 = images[:,9]
-                    im100[im100<1] = 1
-                    im1000[im1000<1] = 1
-                    ADC_images = -torch.log(im1000 / im100) / (1000 -100)
+                    if args.use_3D: slicing = [[slice(0,1),slice(9,10)],
+                                               [slice(20,21),slice(29,30)],
+                                               [slice(40,41),slice(49,50)]]
+                    else:  slicing = [[slice(0,1),slice(9,10)]]
+                    ADC_avg_M = torch.zeros(size = (len(slicing),M.shape[0],1,*M.shape[-2:]),device=rank)
+                    ADC_avg_images = torch.zeros(size = (len(slicing),images.shape[0],1,*images.shape[-2:]),device=rank)
 
-                    M100 = M[:, 0]
-                    M1000 = M[:, 9]
-                    M100[M100 < 1] = 1
-                    M1000[M1000 < 1] = 1
-                    ADC_M = -torch.log(M1000 / M100) / (1000 - 100)
+                    for diff_index,sl in enumerate(slicing):
+                        im100 = images[:,sl[0]]
+                        im1000 = images[:,sl[1]]
+                        im100= im100+ torch.tensor(0.0001, device=im100.device)
+                        im1000= im1000+ torch.tensor(0.0001, device=im100.device)
+                        ADC_avg_images[diff_index] = -torch.log(im1000 / im100) / (1000 -100)
 
-
+                        M100 = M[:, sl[0]]
+                        M1000 = M[:,sl[1]]
+                        M100= M100+ torch.tensor(0.0001, device=im100.device)
+                        M1000= M1000+  torch.tensor(0.0001, device=im100.device)
+                        ADC_avg_M[diff_index] = -torch.log(M1000 / M100) / (1000 - 100)
+                    ADC_avg_images = torch.mean(ADC_avg_images,dim=0)
+                    ADC_avg_M = torch.mean(ADC_avg_M, dim=0)
                 ADC_loss_val = 1
+
+
                 if ADC_loss:
-                    #criterion.update_data_range(torch.max(ADC_images))
-                    loss = criterion(ADC_M.unsqueeze(dim=1), ADC_images.unsqueeze(dim=1), ssim_bool=False)
+                    criterion.update_data_range(torch.max(ADC_avg_images))
+                    loss = 6*1000*criterion(ADC_avg_M, ADC_avg_images, ssim_bool=False)#12
                     ADC_loss_val = loss.item()
-                    #criterion.update_data_range(torch.max(images))
-                    loss += criterion(M, images,  ssim_bool=False)
+                    criterion.update_data_range(torch.max(images))
+                    loss += criterion(M, images,  ssim_bool=True)
                     # criterion.update_data_range(torch.max(images[:, 0:1]))
                     # loss *= criterion(M[:, 0:1], images[:, 0:1], ssim_bool=True, only_ssim=True)
 
                 else:
                     criterion.update_data_range(torch.max(images))
-                    loss = criterion(M,images)
+                    loss = criterion(M,images, ssim_bool = True)
                 loss.backward()
 
                 #Maximum gradient before clipping
@@ -319,13 +333,13 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
 
         # save the model for the current epoch
-        if rank==0 and save_checkpoint and not os.getenv("WANDB_SWEEP_ID") and epoch%5==0 and epoch>29:#save every 5 epoch
+        if rank==0 and save_checkpoint and not os.getenv("WANDB_SWEEP_ID")  and epoch>29:#save every 5 epoch
             save_path  = Path(os.path.join(dir_checkpoint,args.main_folder,training_model,fitting_model))
             save_path.mkdir(parents=True, exist_ok=True)
             torch.save(net.state_dict(), str(save_path / f'checkpoint_epoch{epoch}_{experiment.id}.pth'))
             logging.info(f'Sweep run (Batch_size {batch_size} num_epochs {epochs} lr {learning_rate:.4f}) saved!')
 
-        elif sweeping and save_checkpoint and  os.getenv("WANDB_SWEEP_ID") and epoch%5==0 and epoch>29:
+        elif sweeping and save_checkpoint and  os.getenv("WANDB_SWEEP_ID") and epoch>29:
             save_path = Path(os.path.join(dir_checkpoint,args.main_folder,training_model,fitting_model,f'run_{run_number}'))
             Path(save_path).mkdir(parents=True, exist_ok=True)
             torch.save(net.state_dict(), str(save_path / 'checkpoint_epoch{}.pth'.format(epoch)))
@@ -351,7 +365,7 @@ def get_args():
     parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S', 
                         dest='dir')
     parser.add_argument('--parallel_training', '-parallel', action='store_true', help='Use argument for parallel training with multiple GPUs.')
-    parser.add_argument('--sweep type=str', '-sweep', action='store_true', help='Use this flag if you want to run hyper parameter tuning')
+    parser.add_argument('--sweep', '-sweep', action='store_true', help='Use this flag if you want to run hyper parameter tuning')
     parser.add_argument('--custom_patient_list', '-clist', type=str, help='Input path to txt file with patient names to be used.')#default='new_patientList.txt'
     parser.add_argument('--input_sigma', '-s',  type=str, help='Use argument if sigma map is used as input.')
     parser.add_argument('--training_model', '-trn', default='attention_unet',help='Specify which training model to use. Choose between ...,...,...')
@@ -359,6 +373,7 @@ def get_args():
     parser.add_argument('--run_number', '-rnum', default='1', help='This argument is used by sweep_train.py')
     parser.add_argument('--main_folder', '-folder', default='cross_validation_l1', help='Specify main folder name')
     parser.add_argument('--adc_as_loss', '-adc', type=str, help='Pass True if use ADC as loss function')#default='new_patientList.txt'
+    parser.add_argument('--use_3D', '-3d', type= str, help='Pass True if using 3D diffusion')#default='new_patientList.txt'
 
 
     return parser.parse_args()
@@ -382,10 +397,10 @@ def main(rank,world_size ,sweep):
             content = file.read().strip()  # Remove leading/trailing whitespace (if any)
             patient_list = content.split(',')
         #Dataset containing patients from the custom list only
-        patientData = patientDataset(data_dir,input_sigma=args.input_sigma,  custom_list=patient_list, transform=False, crop = True,model_unetr =  model_unetr)
+        patientData = patientDataset(data_dir,input_sigma=args.input_sigma,  custom_list=patient_list, transform=False, crop = True,model_unetr =  model_unetr, use_3D=args.use_3D)
     else:
         #Dataset containing all patients in data_dir
-        patientData = patientDataset(data_dir,input_sigma=args.input_sigma, transform=False, crop = True,model_unetr =  model_unetr)
+        patientData = patientDataset(data_dir,input_sigma=args.input_sigma, transform=False, crop = True,model_unetr =  model_unetr, use_3D=args.use_3D)
 
     if rank ==0:
         #Log by one GPU (with ID = 0) only
@@ -393,21 +408,22 @@ def main(rank,world_size ,sweep):
 
     b = torch.linspace(0, 2000, steps=21).cuda(non_blocking=True)
     b = b[1:]
-
     n_channels = 20
+    if args.use_3D: n_channels *= 3
+
 
     if args.training_model == 'attention_unet':
         n_mess = "atten_unet"
-        net = Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
+        net = Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D).cuda()
     elif args.training_model == 'unet':
         n_mess = "unet"
-        net = UNet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
+        net = UNet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D).cuda()
     elif args.training_model == 'res_atten_unet':
         n_mess = "res_atten_unet"
-        net = Res_Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
+        net = Res_Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D).cuda()
     elif args.training_model == 'unet_2decoder':
         n_mess = "unet_2decoder"
-        net = UNet_2Decoders(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
+        net = UNet_2Decoders(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D).cuda()
     elif args.training_model == 'unetr':
         n_mess = "unetr"
 

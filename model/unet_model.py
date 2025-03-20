@@ -2,24 +2,24 @@
 from model.unet_parts import *
 from model.utils import *
 from cmath import sqrt
-
+import numpy as np
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, input_sigma: bool, fitting_model:str, rice=True, bilinear=False):
+    def __init__(self, n_channels, input_sigma: bool, fitting_model:str, rice=True, bilinear=False,use_3D = False):
         super(UNet, self).__init__()
         self.input_sigma = input_sigma
         self.n_channels = n_channels
         self.fitting_model = fitting_model
-        ####################################################################################
-        ####################################################################################
-        ####################################################################################
-        ####################################################################################
+        self.use_3D = use_3D
         if fitting_model == 'biexp':
             self.n_classes = 3
         elif fitting_model == 'kurtosis':
             self.n_classes = 2
         elif fitting_model == 'gamma':
             self.n_classes = 2
+
+        if use_3D:
+            self.n_classes *= 3
         ####################################################################################
         if not self.input_sigma:
             self.n_classes += 1
@@ -54,90 +54,112 @@ class UNet(nn.Module):
         if torch.isnan(logits).sum() > 0 or torch.max(logits) > 1e10:
             print(f'-Warning: Logits contained {torch.isnan(logits).sum().item()} NaN values and {torch.max(logits)} as maximum value.\n')
 
-        if self.fitting_model == 'biexp':
-            d_1 = logits[:, 0:1, :, :]
-            d_2 = logits[:, 1:2, :, :]
-            f = logits[:, 2:3, :, :]
-            # sigma = logits[:, 3:4, :, :]
-            if self.input_sigma:
-                sigma_true[sigma_true == 0.] = 1e-8
-                sigma_scale = self.sigma_scale.to(device=d_1.device)
-                sigma_scale = F.relu(sigma_scale)
-                sigma_final = sigma_true * sigma_scale
-            else:
-                sigma_final = sigmoid_cons(logits[:, 3:4, :, :],0.001,1)
+        num_diffusion = 3 if self.use_3D else 1
+        num_par = self.n_classes + 1 if not self.input_sigma else self.n_classes
 
-            sigma_final[sigma_final == 0.] = 1e-8
-            # make sure D1 is the larger value between D1 and D2
-            if torch.mean(d_1) < torch.mean(d_2):
-                d_1, d_2 = d_2, d_1
-                f = 1 - f
+        par_collect = torch.zeros(size=(num_par, logits.shape[0], *logits.shape[-2:]))
+        par_name_list = [None] * num_par
 
-            d_1 = sigmoid_cons(d_1, 0, 4)  # testa utan också
-            d_2 = sigmoid_cons(d_2, 0, 1)
-            f = sigmoid_cons(f, 0.1, 0.9)
-            # get the expectation of the clean images
+        imag_collect = torch.zeros(size=(num_diffusion, logits.shape[0], np.max(b.shape), *logits.shape[-2:]),
+                                   device=logits.device)
+        if self.input_sigma:
+            sigma_true[sigma_true == 0.] = 1e-8
+            sigma_scale = self.sigma_scale.to(device=logits.device)
+            sigma_scale = F.relu(sigma_scale)
+            sigma_final = sigma_true * sigma_scale
+        else:
+            sigma_final = sigmoid_cons(logits[:, slice(-1, None), :, :], 0.001, 1)
+        sigma_final[sigma_final == 0.] = 1e-8
 
-            v = bio_exp(d_1, d_2, f, b)
+        par_collect[-1] = sigma_final[:, 0]
+        par_name_list[-1] = 'sigma'
+        for index in range(num_diffusion):
+            if self.fitting_model == 'biexp':
 
-            v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
-            if self.rice:
-                res = rice_exp(v, sigma_final)
-            else:
-                res = v
-            return res, {'d1': d_1, 'd2': d_2, 'f': f, 'sigma': sigma_final * scale_factor.view(-1, 1, 1, 1)}
+                d_1 = logits[:, 3*index + 0:3*index + 1, :, :]#shape batch,1,200,240
+                d_2 = logits[:, 3*index + 1:3*index + 2, :, :]
+                f =   logits[:, 3*index + 2:3*index + 3, :, :]
 
-        elif self.fitting_model == 'kurtosis':
+                # make sure D1 is the larger value between D1 and D2
+                if torch.mean(d_1) < torch.mean(d_2):
+                    d_1, d_2 = d_2, d_1
+                    f = 1 - f
 
-            d = logits[:, 0:1, :, :]
-            k = logits[:, 1:2, :, :]
-            if self.input_sigma:
-                sigma_true[sigma_true == 0.] = 1e-8
-                sigma_scale = self.sigma_scale.to(device=d.device)
-                sigma_scale = F.relu(sigma_scale)
-                sigma_final = sigma_true * sigma_scale
-            else:
-                sigma_final = sigmoid_cons(logits[:, 2:3, :, :],0.001,1)
+                d_1 = sigmoid_cons(d_1, 0, 4)  # testa utan också
+                d_2 = sigmoid_cons(d_2, 0, 1)
+                f = sigmoid_cons(f, 0.1, 0.9)
 
-            sigma_final[sigma_final == 0.] = 1e-8
-            # make sure D1 is the larger value between D1 and D2
+                #collect
 
-            d = sigmoid_cons(d, 0, 4)
-            k = sigmoid_cons(k, 0, 1)
-            # get the expectation of the clean images
-            v = kurtosis(b, D=d, K=k)
+                par_collect[3 * index + 0] = d_1[:,0]
+                par_collect[3 * index + 1] = d_2[:,0]
+                par_collect[3 * index + 2] = f[:,0]
+                par_name_list[3 * index + 0] = 'D1'
+                par_name_list[3 * index + 1] = 'D2'
+                par_name_list[3 * index + 2] = 'f'
 
-            v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
-            if self.rice:
-                res = rice_exp(v, sigma_final)
-            else:
-                res = v
-            return res, {'D': d, 'K': k, 'sigma': sigma_final * scale_factor.view(-1, 1, 1, 1)}
-        elif self.fitting_model == 'gamma':
-            theta = logits[:, 0:1, :, :]
-            k = logits[:, 1:2, :, :]
-            if self.input_sigma:
-                sigma_true[sigma_true == 0.] = 1e-8
-                sigma_scale = self.sigma_scale.to(device=k.device)
-                sigma_scale = F.relu(sigma_scale)
-                sigma_final = sigma_true * sigma_scale
-            else:
-                sigma_final = sigmoid_cons(logits[:, 2:3, :, :],0.001,1)
 
-            sigma_final[sigma_final == 0.] = 1e-8
-            # make sure D1 is the larger value between D1 and D2
+                # get the expectation of the clean images
 
-            theta = sigmoid_cons(theta, 0, 10)
-            k = sigmoid_cons(k, 0, 20)
-            # get the expectation of the clean images
-            v = gamma(bval=b, theta=theta, K=k)
+                v = bio_exp(d_1, d_2, f, b)
 
-            v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
-            if self.rice:
-                res = rice_exp(v, sigma_final)
-            else:
-                res = v
-            return res, {'Theta': theta, 'K': k, 'sigma': sigma_final * scale_factor.view(-1, 1, 1, 1)}
+                v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
+
+                if self.rice:
+                    res =  F.relu(rice_exp(v, sigma_final)) +  1 / scale_factor.view(-1, 1, 1, 1)
+                else:
+                    res = F.relu(v) +  1 / scale_factor.view(-1, 1, 1, 1)
+                imag_collect[index] = res
+            elif self.fitting_model == 'kurtosis':
+
+                d = logits[:, 2*index + 0:2*index + 1, :, :]
+                k = logits[:, 2*index + 1:2*index + 2, :, :]
+
+
+                d = sigmoid_cons(d, 0, 4)
+                k = sigmoid_cons(k, 0, 1)
+
+                par_collect[2 * index + 0] = d[:,0]
+                par_collect[2 * index + 1] = k[:,0]
+                par_name_list[2 * index + 0] = 'D'
+                par_name_list[2 * index + 1] = 'K'
+
+
+                # get the expectation of the clean images
+                v = kurtosis(b, D = d,K = k)
+                v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
+
+                if self.rice:
+                    res = rice_exp(v, sigma_final)
+                else:
+                    res = v
+                imag_collect[index] = res
+            elif self.fitting_model == 'gamma':
+                theta = logits[:, 2*index + 0:2*index + 1, :, :]
+                k =     logits[:, 2*index + 1:2*index + 2, :, :]
+
+                theta = sigmoid_cons(theta, 0, 10)
+                k = sigmoid_cons(k, 0, 20)
+
+
+
+                par_collect[2 * index + 0] = k[:,0]
+                par_collect[2 * index + 1] = theta[:,0]
+                par_name_list[2 * index + 0] = 'K'
+                par_name_list[2 * index + 1] = 'Theta'
+
+                # get the expectation of the clean images
+                v = gamma(bval=b, theta=theta,K=k)
+
+                v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
+                if self.rice:
+                    res = rice_exp(v, sigma_final)
+                else:
+                    res = v
+                imag_collect[index] = res
+        imag_collect_cat = torch.cat([imag_collect[i] for i in range(num_diffusion)], dim=1)  # Concatenate along dim=1
+        return imag_collect_cat, {'parameters': par_collect, 'sigma': sigma_final * scale_factor.view(-1, 1, 1, 1), 'names':par_name_list}
+
 
 
 
