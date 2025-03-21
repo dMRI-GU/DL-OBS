@@ -21,6 +21,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DistributedSampler
 import torch.multiprocessing as mp
 import os
+import torchvision.models as models
 
 #Directory for net models to be saved at as .pth files
 dir_checkpoint = Path('../checkpoints')
@@ -47,6 +48,10 @@ def setup(rank, world_size):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
+
+
+
+
 class CustomLoss(nn.Module):
 
     """
@@ -58,6 +63,7 @@ class CustomLoss(nn.Module):
 
         >>>loss_value = loss(predicted,target)
     """
+
 
     def __init__(self):
         super(CustomLoss, self).__init__()
@@ -269,10 +275,12 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
                 if ADC_loss:
                     criterion.update_data_range(torch.max(ADC_avg_images))
-                    loss = 6*1000*criterion(ADC_avg_M, ADC_avg_images, ssim_bool=False)#12
+                    loss = 6*1000*criterion(ADC_avg_M, ADC_avg_images, ssim_bool=False)#12, 6
                     ADC_loss_val = loss.item()
                     criterion.update_data_range(torch.max(images))
                     loss += criterion(M, images,  ssim_bool=True)
+
+
                     # criterion.update_data_range(torch.max(images[:, 0:1]))
                     # loss *= criterion(M[:, 0:1], images[:, 0:1], ssim_bool=True, only_ssim=True)
 
@@ -374,6 +382,7 @@ def get_args():
     parser.add_argument('--main_folder', '-folder', default='cross_validation_l1', help='Specify main folder name')
     parser.add_argument('--adc_as_loss', '-adc', type=str, help='Pass True if use ADC as loss function')#default='new_patientList.txt'
     parser.add_argument('--use_3D', '-3d', type= str, help='Pass True if using 3D diffusion')#default='new_patientList.txt'
+    parser.add_argument('--learn_sigma_scaling', '-ss', type= str, help='Pass True if allowing for AI to learn scaling sigma')#default='new_patientList.txt'
 
 
     return parser.parse_args()
@@ -414,13 +423,13 @@ def main(rank,world_size ,sweep):
 
     if args.training_model == 'attention_unet':
         n_mess = "atten_unet"
-        net = Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D).cuda()
+        net = Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling).cuda()
     elif args.training_model == 'unet':
         n_mess = "unet"
-        net = UNet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D).cuda()
+        net = UNet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling).cuda()
     elif args.training_model == 'res_atten_unet':
         n_mess = "res_atten_unet"
-        net = Res_Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D).cuda()
+        net = Res_Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling).cuda()
     elif args.training_model == 'unet_2decoder':
         n_mess = "unet_2decoder"
         net = UNet_2Decoders(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D).cuda()

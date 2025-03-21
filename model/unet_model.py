@@ -5,12 +5,13 @@ from cmath import sqrt
 import numpy as np
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, input_sigma: bool, fitting_model:str, rice=True, bilinear=False,use_3D = False):
+    def __init__(self, n_channels, input_sigma: bool, fitting_model:str, rice=True, bilinear=False,use_3D = False,learn_sigma_scaling = True):
         super(UNet, self).__init__()
         self.input_sigma = input_sigma
         self.n_channels = n_channels
         self.fitting_model = fitting_model
         self.use_3D = use_3D
+        self.learn_sigma_scaling = learn_sigma_scaling
         if fitting_model == 'biexp':
             self.n_classes = 3
         elif fitting_model == 'kurtosis':
@@ -38,7 +39,10 @@ class UNet(nn.Module):
         self.up3 = Up(256, 128 // factor, bilinear)
         self.up4 = Up(128, 64, bilinear)
         self.outc = OutConv(64, self.n_classes)
-        self.sigma_scale = nn.Parameter(torch.tensor(1.0, requires_grad=True))
+        if self.learn_sigma_scaling:
+            self.sigma_scale = nn.Parameter(torch.tensor(1.0, requires_grad=True))
+        else:
+            self.sigma_scale = torch.tensor(1.0, requires_grad=False)
 
     def forward(self, x,b,b0,sigma_true, scale_factor):
         x1 = self.inc(x)
@@ -64,9 +68,12 @@ class UNet(nn.Module):
                                    device=logits.device)
         if self.input_sigma:
             sigma_true[sigma_true == 0.] = 1e-8
-            sigma_scale = self.sigma_scale.to(device=logits.device)
-            sigma_scale = F.relu(sigma_scale)
-            sigma_final = sigma_true * sigma_scale
+            if self.learn_sigma_scaling:
+                sigma_scale = self.sigma_scale.to(device=logits.device)
+                sigma_scale = F.relu(sigma_scale)
+                sigma_final = sigma_true * sigma_scale
+            else:
+                sigma_final = sigma_true
         else:
             sigma_final = sigmoid_cons(logits[:, slice(-1, None), :, :], 0.001, 1)
         sigma_final[sigma_final == 0.] = 1e-8
