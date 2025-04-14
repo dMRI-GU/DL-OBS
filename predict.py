@@ -14,7 +14,7 @@ import wandb
 import torch.nn as nn
 from tqdm import tqdm
 from IPython import embed
-result_path = Path('../results/cross_validation_l1_ssim_adc/')
+result_path = Path('/TANK/mustafa/results/cross_validation_l1_ssim_s0est/')
 
 
 class CustomLoss(nn.Module):
@@ -28,6 +28,7 @@ class CustomLoss(nn.Module):
 
         >>>loss_value = loss(predicted,target)
     """
+
 
     def __init__(self):
         super(CustomLoss, self).__init__()
@@ -52,18 +53,20 @@ class CustomLoss(nn.Module):
         else:
             loss_mse = 1
         return loss_ssim * loss_mse
-
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
-    parser.add_argument('--load', '-f', type=str, default='../checkpoints/cross_validation_l1_ssim_adc',
+    parser.add_argument('--load', '-f', type=str, default='/TANK/mustafa/checkpoints/cross_validation_l1_ssim_s0est',
                         help='Load the model to test the result')
     parser.add_argument('--custom_patient_list', '-clist', type=str, default='predictList.txt', help='Input path to txt file with patient names to be used.')
     parser.add_argument('--epoch_number', '-enum', type=str, default='30', help='Input epoch number to be used for prediction.')
     parser.add_argument('--rice', '-rice', action='store_true',help='Use this flag if you want to add Rician bias')
-    parser.add_argument('--filter', '-filter',  type=str, default='', help='Filter models to predict, for example -filter attention_unte.')
+    parser.add_argument('--filter', '-filter',  type=str, default='', help='Filter models to predict, for example -filter attention_unet.')
     parser.add_argument('--test_data_directory', '-dir',  type=str, default='/m2_data/mustafa/nonTrainData/', help='Path to the test data.')
     parser.add_argument('--use_3D', '-3d',  action = 'store_true', help='If 3D')
     parser.add_argument('--learn_sigma_scaling', '-ss', type= str, help='Pass True if allowing for AI to learn scaling sigma')#default='new_patientList.txt'
+    parser.add_argument('--input_sigma', '-s',  action = 'store_true', help='If sigma')
+    parser.add_argument('--estimate_S0', '-s0', action = 'store_true', help='Pass True if allowing for AI to estimate S0-image')#default='new_patientList.txt'
+    parser.add_argument('--feed_sigma', '-fs', action = 'store_true', help='Pass True if feeding sigma map to AI. Input sigma has to be true')#default='new_patientList.txt'
 
     return parser.parse_args()
 
@@ -148,6 +151,8 @@ if __name__ == '__main__':
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
     args = get_args()
+    assert not(args.feed_sigma and not args.input_sigma), 'Error: Argument input_sigma needs to be true if argument feed_sigma is passed'
+
     if args.custom_patient_list:
         with open(args.custom_patient_list, 'r') as file:
             # Read the entire file content and split by commas
@@ -159,14 +164,14 @@ if __name__ == '__main__':
     # Example usage:
     folder_path = args.load
     indexed_files = index_files(folder_path)
-    indexed_files = [f for f in indexed_files if args.epoch_number in f and args.filter in f]
+    indexed_files = [f for f in indexed_files if args.filter in f]
     for patient in predict_list:
         print(f'Running model for patient: {patient}::\n\n')
         for i,pth_file in enumerate(indexed_files):
             model_name, fitting_name,run_number, file_name = extract_file_name_folders(indexed_files[i]) # List of all files with their full paths
-
+            print( model_name, fitting_name,run_number, file_name)
             # Load the test dataset
-            test = patientDataset(test_dir,  custom_list=[patient], input_sigma=True, use_3D=args.use_3D)
+            test = patientDataset(test_dir,  custom_list=[patient], input_sigma=args.input_sigma, use_3D=args.use_3D, fitting_model=fitting_name)
             if args.use_3D:
                 batch_size = 22
             else:
@@ -188,13 +193,14 @@ if __name__ == '__main__':
 
             # Load the UNet model
             if model_name == 'attention_unet':
-                net = Atten_Unet(n_channels=n_channels, rice=args.rice, bilinear=False, input_sigma=True, fitting_model=fitting_name, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling)
+                net = Atten_Unet(n_channels=n_channels, rice=args.rice, bilinear=False, input_sigma=args.input_sigma, fitting_model=fitting_name, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, feed_sigma=args.feed_sigma)
 
             elif model_name == 'unet':
-                net = UNet(n_channels=n_channels, rice=args.rice, bilinear=False, input_sigma=True,fitting_model=fitting_name, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling)
+                net = UNet(n_channels=n_channels, rice=args.rice, bilinear=False, input_sigma=args.input_sigma,fitting_model=fitting_name, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, feed_sigma=args.feed_sigma)
             elif model_name == 'res_atten_unet':
-                net = Res_Atten_Unet(n_channels=n_channels, rice=args.rice, bilinear=False, input_sigma=True, fitting_model=fitting_name, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling)
-
+                net = Res_Atten_Unet(n_channels=n_channels, rice=args.rice, bilinear=False, input_sigma=args.input_sigma, fitting_model=fitting_name, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, feed_sigma=args.feed_sigma)
+            else:
+                assert False, f'Could not find type of network model, i got {model_name}'
 
             #net = UNet(n_channels=20, b=b, rice=args.rice, bilinear=False)
             #net = Res_Atten_Unet(n_channels=20, b=b, rice=args.rice, bilinear=False)

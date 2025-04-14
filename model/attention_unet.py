@@ -1,17 +1,19 @@
 import numpy as np
+import torch
 
 from model.unet_parts import *
 from model.utils import *
 from cmath import sqrt
 
 class Atten_Unet(nn.Module):
-    def __init__(self, n_channels, input_sigma: bool, fitting_model:str, rice=True, bilinear=False, use_3D = False, learn_sigma_scaling = True):
+    def __init__(self, n_channels, input_sigma: bool, fitting_model:str,estimate_S0,feed_sigma, rice=True, bilinear=False, use_3D = False, learn_sigma_scaling = False):
         super(Atten_Unet, self).__init__()
         self.input_sigma = input_sigma
         self.n_channels = n_channels
         self.fitting_model = fitting_model
         self.use_3D = use_3D
         self.learn_sigma_scaling = learn_sigma_scaling
+        self.estimate_S0 = estimate_S0
         if fitting_model == 'biexp':
             self.n_classes = 3
         elif fitting_model == 'kurtosis':
@@ -24,11 +26,23 @@ class Atten_Unet(nn.Module):
         ####################################################################################
         if not self.input_sigma:
             self.n_classes += 1
+        if self.estimate_S0:
+            self.n_classes += 1
 
         self.bilinear = bilinear
         self.rice = rice
+        self.feed_sigma = feed_sigma
+        if self.feed_sigma: add_channel = 1
+        else: add_channel = 0
 
-        self.inc = DoubleConv(n_channels, 64)
+        if use_3D:
+            self.inc = nn.Sequential(
+                DoubleConv(n_channels + add_channel, 64 * 3),
+                DoubleConv(64 * 3, 64 * 2),
+                DoubleConv(64 * 2, 64)
+            )
+        else:
+            self.inc = DoubleConv(n_channels + add_channel, 64)
         self.down1 = Down(64, 128)
         self.down2 = Down(128, 256)
         self.down3 = Down(256, 512)
@@ -60,7 +74,9 @@ class Atten_Unet(nn.Module):
 
 
     def forward(self, x,b,b0,sigma_true, scale_factor):
-       
+
+
+        if self.feed_sigma:  x = torch.cat([x, sigma_true], dim=1)
         x1 = self.inc(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
@@ -91,7 +107,11 @@ class Atten_Unet(nn.Module):
             print(f'-Warning: Logits contained {torch.isnan(logits).sum().item()} NaN values and {torch.max(logits)} as maximum value.\n')
 
         num_diffusion = 3 if self.use_3D else 1
-        num_par = self.n_classes+1 if not self.input_sigma else self.n_classes
+        num_par = self.n_classes
+        if self.input_sigma:
+            num_par+=1
+        if not self.estimate_S0:
+            num_par+=1
 
         par_collect = torch.zeros(size=(num_par,logits.shape[0],*logits.shape[-2:]))
         par_name_list = [None] * num_par
@@ -106,11 +126,20 @@ class Atten_Unet(nn.Module):
             else:
                 sigma_final = sigma_true
         else:
-            sigma_final = sigmoid_cons(logits[:, slice(-1, None), :, :], 0.001, 1)
+            sigma_final = sigmoid_cons(logits[:, slice(-1, None), :, :], 0.01, 1)
         sigma_final[sigma_final == 0.] = 1e-8
 
         par_collect[-1] = sigma_final[:,0]
         par_name_list[-1] = 'sigma'
+
+        if self.estimate_S0:
+            if not self.input_sigma: s0 = sigmoid_cons(logits[:, slice(-2, -1), :, :],0.001,1.4)
+            else: s0 = sigmoid_cons(logits[:, slice(-1, None), :, :],0.001,1.4)
+        else:
+            s0 = b0
+        par_collect[-2] = s0[:, 0]
+        par_name_list[-2] = 's0'
+
         for index in range(num_diffusion):
             if self.fitting_model == 'biexp':
 
@@ -119,9 +148,9 @@ class Atten_Unet(nn.Module):
                 f =   logits[:, 3*index + 2:3*index + 3, :, :]
 
                 # make sure D1 is the larger value between D1 and D2
-                if torch.mean(d_1) < torch.mean(d_2):
-                    d_1, d_2 = d_2, d_1
-                    f = 1 - f
+                #if torch.mean(d_1) < torch.mean(d_2):
+                #    d_1, d_2 = d_2, d_1
+                #    f = 1 - f
 
                 d_1 = sigmoid_cons(d_1, 0, 4)  # testa utan också
                 d_2 = sigmoid_cons(d_2, 0, 1)
@@ -141,12 +170,17 @@ class Atten_Unet(nn.Module):
 
                 v = bio_exp(d_1, d_2, f, b)
 
-                v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
+                if self.estimate_S0:
+                    v = (s0 * v)
+                else:
+                    v = (s0 * v) / (scale_factor.view(-1, 1, 1, 1))
+
 
                 if self.rice:
-                    res =  F.relu(rice_exp(v, sigma_final)) +  1 / scale_factor.view(-1, 1, 1, 1)
+                    res =  F.relu(rice_exp(v, sigma_final)) #+  1 / scale_factor.view(-1, 1, 1, 1)
                 else:
-                    res = F.relu(v) +  1 / scale_factor.view(-1, 1, 1, 1)
+                    res = F.relu(v) #+  1 / scale_factor.view(-1, 1, 1, 1)
+
                 imag_collect[index] = res
             elif self.fitting_model == 'kurtosis':
 
@@ -165,7 +199,11 @@ class Atten_Unet(nn.Module):
 
                 # get the expectation of the clean images
                 v = kurtosis(b, D = d,K = k)
-                v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
+                if self.estimate_S0:
+                    v = (s0 * v)
+                else:
+                    v = (s0 * v) / (scale_factor.view(-1, 1, 1, 1))
+
 
                 if self.rice:
                     res = rice_exp(v, sigma_final)
@@ -187,14 +225,20 @@ class Atten_Unet(nn.Module):
                 # get the expectation of the clean images
                 v = gamma(bval=b, theta=theta,K=k)
 
-                v = (b0 * v) / (scale_factor.view(-1, 1, 1, 1))
+                if self.estimate_S0:
+                    v = (s0 * v)
+                else:
+                    v = (s0 * v) / (scale_factor.view(-1, 1, 1, 1))
+
+
+
                 if self.rice:
                     res = rice_exp(v, sigma_final)
                 else:
                     res = v
                 imag_collect[index] = res
         imag_collect_cat = torch.cat([imag_collect[i] for i in range(num_diffusion)], dim=1)  # Concatenate along dim=1
-        return imag_collect_cat, {'parameters': par_collect, 'sigma': sigma_final * scale_factor.view(-1, 1, 1, 1), 'names':par_name_list}
+        return imag_collect_cat, {'parameters': par_collect, 'sigma': sigma_final * scale_factor.view(-1, 1, 1, 1) , 'names':par_name_list}
 
 
     def pad_cat(self, s, b):
