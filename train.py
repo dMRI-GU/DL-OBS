@@ -56,7 +56,7 @@ def setup(rank, world_size):
 class CustomLoss(nn.Module):
 
     """
-    Custom loss function: :math:`L` = (1-SSIM) :math:`\cdot` MSEloss
+    Custom loss function: :math:`L` = (1-SSIM) :math:`\cdot` L1
 
     Example:
 
@@ -68,13 +68,21 @@ class CustomLoss(nn.Module):
 
     def __init__(self):
         super(CustomLoss, self).__init__()
+        # For one dimensional channel, for example when inputting ADC map in loss function.
         self.ssim_loss = MS_SSIM(channel=1, win_size=5)
-        self.ssim_loss2 = MS_SSIM(channel=20, win_size=5)
-        self.ssim_loss3 = MS_SSIM(channel=60, win_size=5)
-        self.mse_loss =  nn.L1Loss()#nn.MSELoss()
+
+        self.ssim_loss2 = MS_SSIM(channel=20, win_size=5)#Default number of channels
+        self.ssim_loss3 = MS_SSIM(channel=60, win_size=5)#If we use 3D in training
+        self.l1_loss =  nn.L1Loss()#nn.MSELoss()
     def update_data_range(self, range):
         self.ssim_loss.data_range = range
     def forward(self, M,images, ssim_bool = False, only_ssim = False):
+        """
+            :param M: The predicted data/image
+            :param images: The target data/image
+            :param ssim_bool: If True, ssim is part of the loss function. Else only L1 is calculated
+            :param only_ssim: If True, the loss function will only be = 1-ssim. L1 would not be included.
+            """
         if M.shape[1]>1 and M.shape[1]<21 and ssim_bool:
             loss_ssim = 1 - self.ssim_loss2(M, images)
         elif M.shape[1]>21 and ssim_bool:
@@ -85,11 +93,10 @@ class CustomLoss(nn.Module):
             loss_ssim = 1
 
         if not only_ssim:
-
-            loss_mse = self.mse_loss(M,images)
+            l1_loss = self.l1_loss(M,images)
         else:
-            loss_mse = 1
-        return loss_ssim * loss_mse
+            l1_loss = 1
+        return loss_ssim * l1_loss
 
 def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str, fitting_model: str,run_number: str, world_size=None,rank = None,device = None,  epochs: int=30, batch_size: int=1, learning_rate: float = 1e-3,
     val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False):
@@ -143,7 +150,8 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
     assert not(args.feed_sigma and not args.input_sigma), 'Error: Argument input_sigma needs to be true if argument feed_sigma is passed'
 
-    ADC_loss = args.adc_as_loss
+    ADC_loss = args.adc_as_loss#store boolean 'adc_as_loss'
+
     b = b.reshape(1, len(b), 1, 1)#Reshaped to match dimension of data (num_slices, num_diffusion_levels, width, height)
 
     # split into training and validation set
@@ -164,36 +172,29 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
         print(f'Not sweeping and using rank {rank}')
 
 
-    #Num_workers must = 0, as num_workers > 0 duplicates the data to RAM. Bug?
+    #For large data, num_workers must be low, as each worker will have a copy of the whole data to RAM.
     train_loader_args = dict(batch_size=batch_size, num_workers=0, pin_memory=True)
     val_loader_args = dict(batch_size=1, num_workers=0, pin_memory=True)
 
     train_loader = DataLoader(train_set, shuffle=False if not sweeping else True,sampler = sampler, **train_loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **val_loader_args)
 
-    if sweeping:
-        logging.info(f'''Starting training:
-                Epochs:          {epochs}
-                Batch size:      {batch_size}
-                Learning rate:   {learning_rate}
-                Training size:   {n_train}
-                Validation size: {n_val}
-                Checkpoints:     {save_checkpoint}
-                Device/rank:     {device}
-        ''')
-    else:
-        logging.info(f'''Starting training:
-        Epochs:          {epochs}
-        Batch size:      {batch_size}
-        Learning rate:   {learning_rate}
-        Training size:   {n_train}
-        Validation size: {n_val}
-        Checkpoints:     {save_checkpoint}
-        Device/rank:     {rank}
-''')
+
+    logging.info(f'''Starting training:
+            Epochs:          {epochs}
+            Batch size:      {batch_size}
+            Learning rate:   {learning_rate}
+            Training size:   {n_train}
+            Validation size: {n_val}
+            Checkpoints:     {save_checkpoint}
+            Device/rank:     {device if sweeping else rank}
+    ''')    #Ranks only relevant in parallel training. In sweep-mode, each GPU has a separate training instance
+
 
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
+    #If validation loss does not increase in two consecutive epochs, lr decreases
+
 
     criterion = CustomLoss()
     global_step = 0
@@ -204,11 +205,11 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
         wandb.watch(models=net, criterion=criterion, log="all", log_freq=10)
     if sweeping:
-        rank = device#GPU-ID = torch.device used during tensor.to()
-        world_size=1#Function runs by one GPU
+        rank = device#GPU-ID: torch.device used during tensor.to().
+        world_size=1#Training session is run by one GPU
 
     post_process= post_processing()#Module used for validation of network during training
-    overfitting_patience = 5  # Stop if no improvement after '5' epochs
+    overfitting_patience = 5  # Stop if no improvement after 5 epochs
     overfitting_counter = 0
 
     for epoch in range(1, epochs+1):
@@ -219,17 +220,14 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
         with tqdm(total=n_train//world_size+1, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
 
             for i, (images,image_b0,sigma,scale_factor) in enumerate(train_loader):
-                #images (num_batches,num_diffusion_levels, width, height): Used as target
-                #image_b0 (num_batches, width, height)
-                #sigma (num_batches, width, height)
-                #scale_factor (num_batches,): Scaling used on sample images in dataset before forward pass
+                #scale_factor: Scaling used on sample images in dataset before forward pass
 
                 # non_blocking=True for asynchronous data transfer (happens in background and simultaneously with other tasks (e.g. computation))
-                images = images.to(rank, dtype=torch.float32, non_blocking=True)
-                sigma = sigma.to(rank, dtype=torch.float32, non_blocking=True)
-                image_b0 = image_b0.to(rank, dtype=torch.float32, non_blocking=True)
-                scale_factor = scale_factor.to(rank, dtype=torch.float32, non_blocking=True)
-                b = b.to(rank, dtype=torch.float32, non_blocking=True)
+                images = images.to(rank, dtype=torch.float32, non_blocking=True)# (n_batches, 20 or 60 if use_3D , 200, 240)
+                sigma = sigma.to(rank, dtype=torch.float32, non_blocking=True)# (n_batches, 1, 200, 240)
+                image_b0 = image_b0.to(rank, dtype=torch.float32, non_blocking=True)# (n_batches, 1, 200, 240)
+                scale_factor = scale_factor.to(rank, dtype=torch.float32, non_blocking=True)#(n_batches,)
+                b = b.to(rank, dtype=torch.float32, non_blocking=True)#(1, 20, 1 , 1)
 
                 if torch.isnan(images).sum() > 0 or torch.max(images) > 1e10:
                     print(f'-Warning: One batch {i} contained {torch.isnan(images).sum().item()} NaN values and {torch.max(images)} as maximum value.\n This batch was skipped.\n')
@@ -249,34 +247,35 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                         f'but loaded images have {images.shape[1]} channels. Please check that ' \
                         'the images are loaded correctly.'
 
-
+                #M has same shape as images (num_batches,num_diffusion_levels, width, height)
                 M, _ = net(images,b,image_b0, sigma,scale_factor)#returnes tuple (M:output_image, dictionary_of_predicted_parameter_values)
+                # M: (n_batches, 20 or 60 if use_3D, 200, 240)
+                # param_dict: dict_keys(['parameters', 'sigma', 'names']),  'names' for parameter names
 
                 #Rescale output and input images, as they were normalized in dataset.
-
                 M = M*scale_factor.view(-1,1,1,1)
                 images = images*scale_factor.view(-1,1,1,1)
 
                 if ADC_loss:
-                    if args.use_3D: slicing = [[slice(0,1),slice(19,20)],
-                                               [slice(20,21),slice(39,40)],
-                                               [slice(40,41),slice(59,60)]]
-                    else:  slicing = [[slice(0,1),slice(19,20)]]
-                    ADC_avg_M = torch.zeros(size = (len(slicing),M.shape[0],1,*M.shape[-2:]),device=rank)
+                    if args.use_3D: slicing = [[slice(0,1),slice(9,10)],#To calculate ADC between b100 and b1000
+                                               [slice(20,21),slice(29,30)],
+                                               [slice(40,41),slice(49,50)]]
+                    else:  slicing = [[slice(0,1),slice(9,10)]]# Array[slice(0,1)] same as [Array[0]]
+                    ADC_avg_M = torch.zeros(size = (len(slicing),M.shape[0],1,*M.shape[-2:]),device=rank)# len(slicing)=3 if 3D else = 1
                     ADC_avg_images = torch.zeros(size = (len(slicing),images.shape[0],1,*images.shape[-2:]),device=rank)
 
                     for diff_index,sl in enumerate(slicing):
                         im100 = images[:,sl[0]]
                         im1000 = images[:,sl[1]]
-                        im100= im100+ torch.tensor(0.0001, device=im100.device)
-                        im1000= im1000+ torch.tensor(0.0001, device=im100.device)
-                        ADC_avg_images[diff_index] = -torch.log(im1000 / im100) / (2000 -100)
+                        im100= im100 + torch.tensor(0.0001, device=im100.device)
+                        im1000= im1000 + torch.tensor(0.0001, device=im100.device)
+                        ADC_avg_images[diff_index] = -torch.log(im1000 / im100) / (1000 -100)
 
                         M100 = M[:, sl[0]]
                         M1000 = M[:,sl[1]]
-                        M100= M100+ torch.tensor(0.0001, device=im100.device)
-                        M1000= M1000+  torch.tensor(0.0001, device=im100.device)
-                        ADC_avg_M[diff_index] = -torch.log(M1000 / M100) / (2000 - 100)
+                        M100= M100 + torch.tensor(0.0001, device=im100.device)
+                        M1000= M1000 +  torch.tensor(0.0001, device=im100.device)
+                        ADC_avg_M[diff_index] = -torch.log(M1000 / M100) / (1000 - 100)
                     ADC_avg_images = torch.mean(ADC_avg_images,dim=0)
                     ADC_avg_M = torch.mean(ADC_avg_M, dim=0)
                 ADC_loss_val = 1
@@ -284,21 +283,20 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
                 if ADC_loss:
                     criterion.update_data_range(torch.max(ADC_avg_images))
-                    loss = 9*1000*criterion(ADC_avg_M, ADC_avg_images, ssim_bool=False)#12, 6
-                    ADC_loss_val = loss.item()
+                    loss = 9*1000*criterion(ADC_avg_M, ADC_avg_images, ssim_bool=False)
+                    # The 9 is arbitrary, depending on how much importance is given to the ADC loss relative to criterion(M,images)
+                    # The 1000 is for correct unit
+
+                    ADC_loss_val = loss.item()#Store for logging
                     criterion.update_data_range(torch.max(images))
                     loss += criterion(M, images,  ssim_bool=True)
-
-
-                    # criterion.update_data_range(torch.max(images[:, 0:1]))
-                    # loss *= criterion(M[:, 0:1], images[:, 0:1], ssim_bool=True, only_ssim=True)
 
                 else:
                     criterion.update_data_range(torch.max(images))
                     loss = criterion(M,images, ssim_bool = True)
                 loss.backward()
 
-                #Maximum gradient before clipping
+                #Maximum gradient before clipping. For logging
                 max_grad_before = max(p.grad.abs().max().item() for p in net.parameters() if p.grad is not None)
 
                 #Clip gradients to a maximum value
@@ -306,10 +304,6 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
                 optimizer.step()
                 optimizer.zero_grad()
-
-                #if math.isnan(loss.item()):
-                #    print("Error: Loss is NaN")
-                #    continue
 
                 global_step += 1
                 if rank ==0 or sweeping:
@@ -330,6 +324,8 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
             with torch.no_grad():
                 val_loss, params, save_dict, M, img,sig = post_process.evaluate(val_loader, net, rank, b, input_sigma=input_sigma, ADC_loss= ADC_loss, use_3D=args.use_3D)
             scheduler.step(torch.round(val_loss*10000)/10000)
+            # The mul. with 10000 and rounding is a workaround to have
+            # scheduler only look at 4 decimals
             if rank == 0 or sweeping:
 
                 logging.info('Validation Loss: {}'.format(val_loss))
@@ -353,16 +349,16 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                 image_save_path = Path(os.path.join(experiment.dir,'images'))
                 image_save_path.mkdir(parents=True, exist_ok=True)
                 experiment.log(logging_dict)
-                for k,v in save_dict.items():
+                for k,v in save_dict.items():#Locally save images
                     plt.imsave(os.path.join(image_save_path,f"{k}_{global_step}.png"), v, cmap="gray")  # Use cmap="gray" for grayscale images
-            if val_loss < avg_loss/num_batches+2:# not overfitting
+            if val_loss < avg_loss/num_batches+2:# +2 leeway in considering as not overfitting
                 if rank == 0 or sweeping:
-                    print(f'not over: val {val_loss:.4f} and avg_loss {avg_loss/num_batches:.4f}')
+                    print(f'Not overfitting: val {val_loss:.4f} and avg_loss {avg_loss/num_batches:.4f}')
                 overfitting_counter = 0  # Reset counter if validation loss improves
-            elif epoch>=15:
+            elif epoch>=15:#Overfitting is considered only for epochs>15.
                 overfitting_counter += 1
                 if rank == 0 or sweeping:
-                    print(f'overfitted: val {val_loss:.4f} and avg_loss {avg_loss/num_batches:.4f} counter {overfitting_counter}')
+                    print(f'Overfitted: val {val_loss:.4f} and avg_loss {avg_loss/num_batches:.4f} counter {overfitting_counter}')
                 if overfitting_counter >= overfitting_patience:
                     print("Early stopping triggered. Reporting run as finished to wandb.")
                     if rank == 0 or sweeping:
@@ -382,7 +378,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
 
         # save the model for the current epoch
-        if (epoch>29 or optimizer.param_groups[0]['lr'] < 1e-6):#save every 5 epoch
+        if (epoch>29 or optimizer.param_groups[0]['lr'] < 1e-6):#'lr' < 1e-6 is too low to learn effectively
 
             if (rank == 0 or sweeping) and save_checkpoint:
                 save_path = Path(
@@ -412,21 +408,17 @@ def get_args():
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--patientData', '-dir', type=str, default='/m2_data/mustafa/patientDataReduced/', help='Enther the directory saving the patient data')
-    parser.add_argument('--diffusion-direction', '-d', type=str, default='M', help='Enter the diffusion direction: M, I, P or S',
-                        dest='dir')
-    parser.add_argument('--parallel_training', '-parallel', action='store_true', help='Use argument for parallel training with multiple GPUs.')
-    parser.add_argument('--sweep', '-sweep', action='store_true', help='Use this flag if you want to run hyper parameter tuning')
     parser.add_argument('--custom_patient_list', '-clist', type=str, help='Input path to txt file with patient names to be used.')#default='new_patientList.txt'
     parser.add_argument('--input_sigma', '-s',  type=str, help='Use argument if sigma map is used as input.')
     parser.add_argument('--training_model', '-trn', default='attention_unet',help='Specify which training model to use. Choose between ...,...,...')
     parser.add_argument('--fitting_model', '-fit', default='biexp', help='Specify which fitting model to use')
     parser.add_argument('--run_number', '-rnum', default='1', help='This argument is used by sweep_train.py')
     parser.add_argument('--main_folder', '-folder', default='cross_validation_l1', help='Specify main folder name')
-    parser.add_argument('--adc_as_loss', '-adc', type=str, help='Pass True if use ADC as loss function')#default='new_patientList.txt'
-    parser.add_argument('--use_3D', '-3d', type= str, help='Pass True if using 3D diffusion')#default='new_patientList.txt'
-    parser.add_argument('--learn_sigma_scaling', '-ss', type= str, help='Pass True if allowing for AI to learn scaling sigma')#default='new_patientList.txt'
-    parser.add_argument('--estimate_S0', '-s0', type= str, help='Pass True if allowing for AI to estimate S0-image')#default='new_patientList.txt'
-    parser.add_argument('--feed_sigma', '-fs', type= str, help='Pass True if feeding sigma map to AI. Input sigma has to be true')#default='new_patientList.txt'
+    parser.add_argument('--adc_as_loss', '-adc', type=str, help='Pass True if use ADC as loss function')
+    parser.add_argument('--use_3D', '-3d', type= str, help='Pass True if using 3D diffusion')
+    parser.add_argument('--learn_sigma_scaling', '-ss', type= str, help='Pass True if allowing for AI to learn scaling sigma')
+    parser.add_argument('--estimate_S0', '-s0', type= str, help='Pass True if allowing for AI to estimate S0-image')
+    parser.add_argument('--feed_sigma', '-fs', type= str, help='Pass True if feeding sigma map to AI. Input sigma has to be true')
 
 
     return parser.parse_args()
@@ -477,22 +469,7 @@ def main(rank,world_size ,sweep):
     elif args.training_model == 'unet_2decoder':
         n_mess = "unet_2decoder"
         net = UNet_2Decoders(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0).cuda()
-    elif args.training_model == 'unetr':
-        n_mess = "unetr"
 
-        img_size_x = 240
-        img_size_y = 208
-        patch_size = 16
-        in_channels = 20
-        embed_dim = in_channels * (patch_size) ** 2
-        num_heads = 8
-        mlp_ratio = 2
-        base_filter = 32 #64 #32 #16
-        num_layers = 8
-
-
-        net = UNETR(img_size_x, img_size_y, patch_size, in_channels, base_filter, embed_dim, num_heads, num_layers,
-                      mlp_ratio,rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model).cuda()
     if rank == 0:
         print("Using ", torch.cuda.device_count(), " GPUs!\n")
         logging.info(f'Network:\n'

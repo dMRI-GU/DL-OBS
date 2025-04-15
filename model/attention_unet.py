@@ -9,11 +9,11 @@ class Atten_Unet(nn.Module):
     def __init__(self, n_channels, input_sigma: bool, fitting_model:str,estimate_S0,feed_sigma, rice=True, bilinear=False, use_3D = False, learn_sigma_scaling = False):
         super(Atten_Unet, self).__init__()
         self.input_sigma = input_sigma
-        self.n_channels = n_channels
+        self.n_channels = n_channels#20 or 60 if use_3D
         self.fitting_model = fitting_model
         self.use_3D = use_3D
         self.learn_sigma_scaling = learn_sigma_scaling
-        self.estimate_S0 = estimate_S0
+        self.estimate_S0 = estimate_S0#Boolean if AI will estimate b0-image
         if fitting_model == 'biexp':
             self.n_classes = 3
         elif fitting_model == 'kurtosis':
@@ -21,21 +21,20 @@ class Atten_Unet(nn.Module):
         elif fitting_model == 'gamma':
             self.n_classes = 2
 
-        if use_3D:#NYRAD
-            self.n_classes *= 3
-        ####################################################################################
+        if use_3D:
+            self.n_classes *= 3#three times more parameters to predict20
         if not self.input_sigma:
-            self.n_classes += 1
+            self.n_classes += 1#If no noise map was input to AI, then AI will predict one
         if self.estimate_S0:
             self.n_classes += 1
 
-        self.bilinear = bilinear
-        self.rice = rice
-        self.feed_sigma = feed_sigma
+        self.bilinear = bilinear#For upsampling, default is False and instead ConvTranspose will be used
+        self.rice = rice#If Rician bias is going to be added.
+        self.feed_sigma = feed_sigma# If noise map is input to AI, then number of input channels is +1
         if self.feed_sigma: add_channel = 1
         else: add_channel = 0
 
-        if use_3D:
+        if use_3D:#First layer
             self.inc = nn.Sequential(
                 DoubleConv(n_channels + add_channel, 64 * 3),
                 DoubleConv(64 * 3, 64 * 2),
@@ -67,9 +66,9 @@ class Atten_Unet(nn.Module):
    
         self.outc = OutConv(64, self.n_classes)
         if self.learn_sigma_scaling:
-            self.sigma_scale = nn.Parameter(torch.tensor(1.0, requires_grad=True))
+            self.sigma_scale = nn.Parameter(torch.tensor(1.0, requires_grad=True))#A learnable parameter
         else:
-            self.sigma_scale = torch.tensor(1.0, requires_grad=False)
+            self.sigma_scale = torch.tensor(1.0, requires_grad=False)# A constant
 
 
 
@@ -108,17 +107,20 @@ class Atten_Unet(nn.Module):
 
         num_diffusion = 3 if self.use_3D else 1
         num_par = self.n_classes
+
+        #n_classes may not count noise map and b0-image
         if self.input_sigma:
             num_par+=1
         if not self.estimate_S0:
             num_par+=1
 
-        par_collect = torch.zeros(size=(num_par,logits.shape[0],*logits.shape[-2:]))
-        par_name_list = [None] * num_par
+        par_collect = torch.zeros(size=(num_par,logits.shape[0],*logits.shape[-2:]))#collect all parameters in one array (num_par,num_batches,H,W)
+        par_name_list = [None] * num_par# [None,None,None...]
 
+        # (num_diffusion_directions, num_batches, num_diffusion_levels, H,W)
         imag_collect = torch.zeros(size=(num_diffusion,logits.shape[0],np.max(b.shape),*logits.shape[-2:]), device=logits.device)
         if self.input_sigma:
-            sigma_true[sigma_true == 0.] = 1e-8
+            sigma_true[sigma_true == 0.] = 1e-8#To avoid overflow
             if self.learn_sigma_scaling:
                 sigma_scale = self.sigma_scale.to(device=logits.device)
                 sigma_scale = F.relu(sigma_scale)
@@ -133,10 +135,10 @@ class Atten_Unet(nn.Module):
         par_name_list[-1] = 'sigma'
 
         if self.estimate_S0:
-            if not self.input_sigma: s0 = sigmoid_cons(logits[:, slice(-2, -1), :, :],0.001,1.4)
-            else: s0 = sigmoid_cons(logits[:, slice(-1, None), :, :],0.001,1.4)
+            if not self.input_sigma: s0 = sigmoid_cons(logits[:, slice(-2, -1), :, :],0.001,1.4)#last index is sigma, second last index is s0
+            else: s0 = sigmoid_cons(logits[:, slice(-1, None), :, :],0.001,1.4)#last index is s0, there is no predicted noise map
         else:
-            s0 = b0
+            s0 = b0#s0 = b0 from scanner
         par_collect[-2] = s0[:, 0]
         par_name_list[-2] = 's0'
 

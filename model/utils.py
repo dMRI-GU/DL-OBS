@@ -3,7 +3,7 @@ from cmath import sqrt
 
 def sigmoid_cons(param, dmin, dmax):
     """
-    constrain the output physilogical parameters into a certain domain
+    constrain the output physilogical parameters between *dmin* and *dmax*
     """
     return dmin+(torch.sigmoid(param))*(dmax-dmin)
 

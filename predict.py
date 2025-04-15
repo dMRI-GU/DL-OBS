@@ -56,17 +56,16 @@ class CustomLoss(nn.Module):
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--load', '-f', type=str, default='/TANK/mustafa/checkpoints/cross_validation_l1_ssim_s0est',
-                        help='Load the model to test the result')
-    parser.add_argument('--custom_patient_list', '-clist', type=str, default='predictList.txt', help='Input path to txt file with patient names to be used.')
-    parser.add_argument('--epoch_number', '-enum', type=str, default='30', help='Input epoch number to be used for prediction.')
-    parser.add_argument('--rice', '-rice', action='store_true',help='Use this flag if you want to add Rician bias')
-    parser.add_argument('--filter', '-filter',  type=str, default='', help='Filter models to predict, for example -filter attention_unet.')
+                        help='Specify folder path to the neural network models to be used for inference')
+    parser.add_argument('--custom_patient_list', '-clist', type=str, default='predictList.txt', help='Input path to txt file with patient names to be used for inference.')
+    parser.add_argument('--rice', '-rice', action='store_true',help='Use this flag if you want to add Rician bias during inference')
+    parser.add_argument('--filter', '-filter',  type=str, default='', help='Filter nerual network models for inference , for example -filter attention_unet.')
     parser.add_argument('--test_data_directory', '-dir',  type=str, default='/m2_data/mustafa/nonTrainData/', help='Path to the test data.')
     parser.add_argument('--use_3D', '-3d',  action = 'store_true', help='If 3D')
-    parser.add_argument('--learn_sigma_scaling', '-ss', type= str, help='Pass True if allowing for AI to learn scaling sigma')#default='new_patientList.txt'
-    parser.add_argument('--input_sigma', '-s',  action = 'store_true', help='If sigma')
-    parser.add_argument('--estimate_S0', '-s0', action = 'store_true', help='Pass True if allowing for AI to estimate S0-image')#default='new_patientList.txt'
-    parser.add_argument('--feed_sigma', '-fs', action = 'store_true', help='Pass True if feeding sigma map to AI. Input sigma has to be true')#default='new_patientList.txt'
+    parser.add_argument('--learn_sigma_scaling', '-ss', type= str, help='Pass True if AI was allowed to learn scaling sigma')
+    parser.add_argument('--input_sigma', '-s',  action = 'store_true', help='If a known noise map was inputted.')
+    parser.add_argument('--estimate_S0', '-s0', action = 'store_true', help='Pass if allowed AI to estimate S0-image')
+    parser.add_argument('--feed_sigma', '-fs', action = 'store_true', help='Pass if feeding sigma map to AI. Input sigma has to be true')
 
     return parser.parse_args()
 
@@ -89,15 +88,24 @@ def to_numpy(*argv):
                 assert False, 'This is not a Tensor or a list'
     return params
 
-def save_params(result_dict,model_folder: str,fitting_folder: str ,patient_folder: str,run_number: str, file_name :str ):
+def save_params(result_dict,model_folder: str,fitting_folder: str ,patient_folder: str,run_number: str):
     """
     save the parameters maps and M as numpy array
+
+    :param result_dict: Dictionery containing the parameter mapss to be saved.
+    :param model_folder: Folder name given as the neural network model. Comes after *result_path*.
+    :param fitting_folder: Folder name given as the fitting model. Comes after *model_folder*.
+    :param patient_folder: Folder name given as the label to the diffusion data, e.g. a patient name. Comes after *fitting_folder*.
+    :param run_number: Folder name given to separate separately trained models with the same settings, e.g. in a n-fold cross validation. Comes after *patient_folder*.
+
     """
     if args.rice:
-        model_name_add = '_rician'
+        model_name_add = '_rician'#model name ends with rician if Rician bias is added
     else:
         model_name_add = ''
     complete_path = os.path.join(result_path,model_folder+model_name_add,fitting_folder,patient_folder.split('_')[0],run_number)
+    #example: /results/cross_validation_1/unet/biexp/run_1/
+
     Path(complete_path).mkdir(parents=True, exist_ok=True)
     for key, res in result_dict.items():
         if torch.is_tensor(res):
@@ -130,41 +138,42 @@ def extract_file_name_folders(path):
     path_norm = Path(path).resolve()  # Normalize the path
     parts = path_norm.parts  # Get all path components
 
-    if len(parts) < 4:  # Ensure there are at least two folders
+    if len(parts) < 4:  # Ensure there are at least three folders
         print('Error you .pth file should be in two nested folders.\n'
               'First folder is named after AI model used\n'
-              'Second folder is named after fitting model used.')
+              'Second folder is named after fitting model used\n'
+              'Third folder is named after the run number.')
         return None, None,None
 
 
-
-    return parts[-4],parts[-3],parts[-2],path[last_slash + 1:last_dot]  # Extract substring
+    #With the structure of data saved, it returns model_name, fitting_name,run_number, file_name
+    return parts[-4],parts[-3],parts[-2],path[last_slash + 1:last_dot] # Extract substring
 
 
 if __name__ == '__main__':
 
     """
     This file load the trained model and run it on one patient, and 
-    saves the result in ./results/
+    saves the result in *result_path*
     """
 
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
     args = get_args()
     assert not(args.feed_sigma and not args.input_sigma), 'Error: Argument input_sigma needs to be true if argument feed_sigma is passed'
+    #Otherwise a tensor(1) is fed to neural network and not a proper noise map
 
     if args.custom_patient_list:
         with open(args.custom_patient_list, 'r') as file:
             # Read the entire file content and split by commas
             content = file.read().strip()  # Remove leading/trailing whitespace (if any)
-            predict_list = content.split(',')
+            predict_list = content.split(',')#List of patients where inference is applied on
 
     test_dir = args.test_data_directory
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    # Example usage:
     folder_path = args.load
     indexed_files = index_files(folder_path)
-    indexed_files = [f for f in indexed_files if args.filter in f]
+    indexed_files = [f for f in indexed_files if args.filter in f]#If filtering is used, e.g. -filter '/unet' only runs inference on unet models
     for patient in predict_list:
         print(f'Running model for patient: {patient}::\n\n')
         for i,pth_file in enumerate(indexed_files):
@@ -172,29 +181,29 @@ if __name__ == '__main__':
             print( model_name, fitting_name,run_number, file_name)
             # Load the test dataset
             test = patientDataset(test_dir,  custom_list=[patient], input_sigma=args.input_sigma, use_3D=args.use_3D, fitting_model=fitting_name)
+
+            #Load all images of that patient
             if args.use_3D:
-                batch_size = 22
+                batch_size = 22# Will load (22,3,200,240)
             else:
-                batch_size = 66
+                batch_size = 66# Will load(66,1,200,240)
 
             test_loader = DataLoader(test, batch_size=batch_size, shuffle=False, num_workers=4)
-            #test_b0 = test.pre.image_b0()
 
             # Initialize the b values [100, 200, 300, ..., 2000]
             b = torch.linspace(0, 2000, steps=21, device=device)
-            b = b[1:]
+            b = b[1:]#Exclude 0
             b = b.reshape(1, len(b), 1, 1)
 
             if args.use_3D:
-                n_channels = 60
+                n_channels = 60#All three diffusion encoding directions are input
             else:
-                n_channels = 20
+                n_channels = 20#Only one diffusion encoding directions is input
 
 
-            # Load the UNet model
+            # Load the neural network model
             if model_name == 'attention_unet':
                 net = Atten_Unet(n_channels=n_channels, rice=args.rice, bilinear=False, input_sigma=args.input_sigma, fitting_model=fitting_name, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, feed_sigma=args.feed_sigma)
-
             elif model_name == 'unet':
                 net = UNet(n_channels=n_channels, rice=args.rice, bilinear=False, input_sigma=args.input_sigma,fitting_model=fitting_name, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, feed_sigma=args.feed_sigma)
             elif model_name == 'res_atten_unet':
@@ -202,37 +211,38 @@ if __name__ == '__main__':
             else:
                 assert False, f'Could not find type of network model, i got {model_name}'
 
-            #net = UNet(n_channels=20, b=b, rice=args.rice, bilinear=False)
-            #net = Res_Atten_Unet(n_channels=20, b=b, rice=args.rice, bilinear=False)
-
-            #net = nn.DataParallel(net)
+            #Load in the trained neural network for inference
             checkpoint = torch.load(indexed_files[i], map_location=device, weights_only=True)
             print(f'loaded model weights from {indexed_files[i]}\n')
+
+            #Needed as with net = nn.parallel.DistributedDataParallel(net) adds the 'module' in the layers' labels.
             modified_checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
 
             net.load_state_dict(modified_checkpoint)
             net.to(device=device)
 
             net.eval()
-            #experiment = wandb.init(project="ResultFromTraining")
             b0_image = None
-            n = len(test)
+            n = len(test)#number of images in a patient
             results = {}
             criterion = CustomLoss()
             with torch.no_grad():
 
                 with tqdm(total=n, unit='img') as pbar:
                     for i, (images,image_b0,sigma,scale_factor) in enumerate(test_loader):
-                        images = images.to(device=device, dtype=torch.float32, non_blocking=True)
-                        sigma = sigma.to(device=device, dtype=torch.float32, non_blocking=True)
-                        image_b0 = image_b0.to(device=device, dtype=torch.float32, non_blocking=True)
-                        scale_factor = scale_factor.to(device=device, dtype=torch.float32, non_blocking=True)
-                        b = b.to(device=device, dtype=torch.float32, non_blocking=True)
+                        images = images.to(device=device, dtype=torch.float32, non_blocking=True)# (66, 20, 200, 240)
+                        sigma = sigma.to(device=device, dtype=torch.float32, non_blocking=True)# (66, 1, 200, 240)
+                        image_b0 = image_b0.to(device=device, dtype=torch.float32, non_blocking=True)# (66, 1, 200, 240)
+                        scale_factor = scale_factor.to(device=device, dtype=torch.float32, non_blocking=True)# (66,)
+                        b = b.to(device=device, dtype=torch.float32, non_blocking=True)# (1, 20, 1, 1)
+
                         mse = torch.nn.MSELoss()
                         M, param_dict = net(images,b,image_b0, sigma,scale_factor)
+                        # M: (66, 20, 200, 240) or (22, 60, 200, 240) if use_3D
+                        #param_dict: dict_keys(['parameters', 'sigma', 'names']),  'names' for parameter names
+
                         M = M * scale_factor.view(-1, 1, 1, 1)
                         images = images * scale_factor.view(-1, 1, 1, 1)
-                        print(f'dtype M: {M.shape} and images {images.shape}')
                         b0_image = image_b0
                         criterion.update_data_range(torch.max(images))
                         loss = criterion(M, images, ssim_bool=True)
