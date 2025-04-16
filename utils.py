@@ -299,9 +299,7 @@ class patientDataset(Dataset):
 
         image_data = image_data / factor#Normalization
 
-        print(image_b0.shape)
         image_b0 = image_b0.unsqueeze(dim=0)#(H,W) -> (1,H,W)
-        print(image_b0.shape)
 
         if input_sigma:
             sigma = sigma / factor
