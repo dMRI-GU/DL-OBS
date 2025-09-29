@@ -1,32 +1,44 @@
+import random
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 from torch import nn, optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split,Subset
 from model.res_attention_unet import Res_Atten_Unet
 from utils import post_processing, patientDataset, init_weights
-from model.unet_MultiDecoder import UNet_MultiDecoders
-from model.UNETR import UNETR
 from IPython import embed
 from model.attention_unet import Atten_Unet
 from model.unet_model import UNet
-from model.unet_2Decoder import UNet_2Decoders
 from pathlib import Path
 import logging
 import wandb
 import argparse
 import torch
 import numpy as np
-from pytorch_msssim import MS_SSIM
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DistributedSampler
 import torch.multiprocessing as mp
 import os
 import torchvision.models as models
+from sklearn.model_selection import KFold
+
+def in_docker():
+    # Check for /.dockerenv (standard Docker flag)
+    if os.path.exists('/.dockerenv'):
+        return True
+    # Check cgroup info for Docker or container runtime
+    try:
+        with open('/proc/1/cgroup', 'rt') as f: return any('docker' in line or 'kubepods' in line or 'containerd' in line for line in f)
+    except Exception:
+        return False
+
 
 #Directory for net models to be saved at as .pth files
-dir_checkpoint = Path('/TANK/mustafa/checkpoints')
-
+dir_checkpoint = Path('/write/your/path/checkpoints') if not in_docker() else Path('/app/checkpoints')
+os.environ["WANDB_BASE_URL"] = "http://localhost:8080" if not in_docker() else "http://wandb:8080"
+dataset_path1 = '/write/your/path'  if not in_docker() else '/host-trainset1/'
+dataset_path2 = '/write/your/path' if not in_docker() else '/host-trainset2/'
+early_termination = False
 
 def setup(rank, world_size):
     """
@@ -51,8 +63,6 @@ def setup(rank, world_size):
 
 
 
-
-
 class CustomLoss(nn.Module):
 
     """
@@ -65,41 +75,25 @@ class CustomLoss(nn.Module):
         >>>loss_value = loss(predicted,target)
     """
 
-
     def __init__(self):
         super(CustomLoss, self).__init__()
         # For one dimensional channel, for example when inputting ADC map in loss function.
-        self.ssim_loss = MS_SSIM(channel=1, win_size=5)
 
-        self.ssim_loss2 = MS_SSIM(channel=20, win_size=5)#Default number of channels
-        self.ssim_loss3 = MS_SSIM(channel=60, win_size=5)#If we use 3D in training
         self.l1_loss =  nn.L1Loss()#nn.MSELoss()
-    def update_data_range(self, range):
-        self.ssim_loss.data_range = range
+
     def forward(self, M,images, ssim_bool = False, only_ssim = False):
         """
             :param M: The predicted data/image
             :param images: The target data/image
-            :param ssim_bool: If True, ssim is part of the loss function. Else only L1 is calculated
-            :param only_ssim: If True, the loss function will only be = 1-ssim. L1 would not be included.
+
             """
-        if M.shape[1]>1 and M.shape[1]<21 and ssim_bool:
-            loss_ssim = 1 - self.ssim_loss2(M, images)
-        elif M.shape[1]>21 and ssim_bool:
-            loss_ssim = 1 - self.ssim_loss3(M, images)
-        elif ssim_bool:
-            loss_ssim = 1 - self.ssim_loss(M, images)
-        else:
-            loss_ssim = 1
+        l1_loss = self.l1_loss(M,images)
 
-        if not only_ssim:
-            l1_loss = self.l1_loss(M,images)
-        else:
-            l1_loss = 1
-        return loss_ssim * l1_loss
+        return l1_loss
 
-def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str, fitting_model: str,run_number: str, world_size=None,rank = None,device = None,  epochs: int=30, batch_size: int=1, learning_rate: float = 1e-3,
-    val_percent: float=0.1, save_checkpoint: bool=True, sweeping = False):
+def train_net(train_set,val_set,run_number, net, b, input_sigma: bool,experiment, training_model: str, fitting_model: str,
+              world_size=None,rank = None,device = None,  epochs: int=30, batch_size: int=1, learning_rate: float = 1e-3,
+              save_checkpoint: bool=True, sweeping = False):
 
     """
     Main function used for training *net*. This function is multi functional and can run on single GPU and on multiple GPUs if available.
@@ -121,8 +115,6 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
     :param training_model: Name of network model, possible values 'unet'/'attention_unet'/'res_atten_unet' for UNet/Attention UNet/Residual Attention UNet.
 
     :param fitting_model: Name of fitting model, possible values 'biexp'/'kurtosis'/'gamma'.
-
-    :param run_number: A string of single number used for tracking run-ID used for cross validation purposes.
 
     :param world_size: Total number of processes (or GPUs) used for parallel training, e.g if 2 machines are used, with 4 GPUs each, then world_size = 8.
 
@@ -149,15 +141,9 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
     args = get_args()#Getting arguments passed from CLI through ArgumentParser.
 
     assert not(args.feed_sigma and not args.input_sigma), 'Error: Argument input_sigma needs to be true if argument feed_sigma is passed'
-
-    ADC_loss = args.adc_as_loss#store boolean 'adc_as_loss'
+    assert not(not args.estimate_sigma and not args.input_sigma), 'Error: Both estimate_sigma and input_sigma are false, one of them must be true since a noise map is needed to function.'
 
     b = b.reshape(1, len(b), 1, 1)#Reshaped to match dimension of data (num_slices, num_diffusion_levels, width, height)
-
-    # split into training and validation set
-    n_val = int(len(dataset) * val_percent)
-    n_train = len(dataset) - n_val
-    train_set, val_set = random_split(dataset, [n_train, n_val])
 
     if sweeping:
         #During a sweep (hyperparameter tuning) each wandb.agent is assigned one GPU (different processes/network are trained in parallel on different GPUs).
@@ -174,7 +160,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
     #For large data, num_workers must be low, as each worker will have a copy of the whole data to RAM.
     train_loader_args = dict(batch_size=batch_size, num_workers=0, pin_memory=True)
-    val_loader_args = dict(batch_size=1, num_workers=0, pin_memory=True)
+    val_loader_args = dict(batch_size=min(10,len(val_set)//2), num_workers=0, pin_memory=True)
 
     train_loader = DataLoader(train_set, shuffle=False if not sweeping else True,sampler = sampler, **train_loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **val_loader_args)
@@ -184,15 +170,15 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
             Epochs:          {epochs}
             Batch size:      {batch_size}
             Learning rate:   {learning_rate}
-            Training size:   {n_train}
-            Validation size: {n_val}
+            Training size:   {len(train_set)}
+            Validation size: {len(val_set)}
             Checkpoints:     {save_checkpoint}
             Device/rank:     {device if sweeping else rank}
     ''')    #Ranks only relevant in parallel training. In sweep-mode, each GPU has a separate training instance
 
 
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer,factor=0.2 ,mode = 'min', patience=8, min_lr = 6e-07)#3 normal, 8 with 200 ep no termination
     #If validation loss does not increase in two consecutive epochs, lr decreases
 
 
@@ -211,13 +197,15 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
     post_process= post_processing()#Module used for validation of network during training
     overfitting_patience = 5  # Stop if no improvement after 5 epochs
     overfitting_counter = 0
+    last_avg_loss = None
+    best_val_loss = None
 
     for epoch in range(1, epochs+1):
         net.train()
         avg_loss = 0
         num_batches = len(train_loader)
 
-        with tqdm(total=n_train//world_size+1, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
+        with tqdm(total=len(train_set)//world_size+1, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
 
             for i, (images,image_b0,sigma,scale_factor) in enumerate(train_loader):
                 #scale_factor: Scaling used on sample images in dataset before forward pass
@@ -248,53 +236,29 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                         'the images are loaded correctly.'
 
                 #M has same shape as images (num_batches,num_diffusion_levels, width, height)
-                M, _ = net(images,b,image_b0, sigma,scale_factor)#returnes tuple (M:output_image, dictionary_of_predicted_parameter_values)
+                M, outdict = net(images,b,image_b0, sigma,scale_factor)#returnes tuple (M:output_image, dictionary_of_predicted_parameter_values)
                 # M: (n_batches, 20 or 60 if use_3D, 200, 240)
                 # param_dict: dict_keys(['parameters', 'sigma', 'names']),  'names' for parameter names
 
                 #Rescale output and input images, as they were normalized in dataset.
                 M = M*scale_factor.view(-1,1,1,1)
                 images = images*scale_factor.view(-1,1,1,1)
-
-                if ADC_loss:
-                    if args.use_3D: slicing = [[slice(0,1),slice(9,10)],#To calculate ADC between b100 and b1000
-                                               [slice(20,21),slice(29,30)],
-                                               [slice(40,41),slice(49,50)]]
-                    else:  slicing = [[slice(0,1),slice(9,10)]]# Array[slice(0,1)] same as [Array[0]]
-                    ADC_avg_M = torch.zeros(size = (len(slicing),M.shape[0],1,*M.shape[-2:]),device=rank)# len(slicing)=3 if 3D else = 1
-                    ADC_avg_images = torch.zeros(size = (len(slicing),images.shape[0],1,*images.shape[-2:]),device=rank)
-
-                    for diff_index,sl in enumerate(slicing):
-                        im100 = images[:,sl[0]]
-                        im1000 = images[:,sl[1]]
-                        im100= im100 + torch.tensor(0.0001, device=im100.device)
-                        im1000= im1000 + torch.tensor(0.0001, device=im100.device)
-                        ADC_avg_images[diff_index] = -torch.log(im1000 / im100) / (1000 -100)
-
-                        M100 = M[:, sl[0]]
-                        M1000 = M[:,sl[1]]
-                        M100= M100 + torch.tensor(0.0001, device=im100.device)
-                        M1000= M1000 +  torch.tensor(0.0001, device=im100.device)
-                        ADC_avg_M[diff_index] = -torch.log(M1000 / M100) / (1000 - 100)
-                    ADC_avg_images = torch.mean(ADC_avg_images,dim=0)
-                    ADC_avg_M = torch.mean(ADC_avg_M, dim=0)
-                ADC_loss_val = 1
+                sigma = sigma*scale_factor.view(-1,1,1,1)
+                if 'estimated_sigma' in outdict:
+                    predicted_sigma = outdict['estimated_sigma']
+                    predicted_sigma = predicted_sigma
 
 
-                if ADC_loss:
-                    criterion.update_data_range(torch.max(ADC_avg_images))
-                    loss = 9*1000*criterion(ADC_avg_M, ADC_avg_images, ssim_bool=False)
-                    # The 9 is arbitrary, depending on how much importance is given to the ADC loss relative to criterion(M,images)
-                    # The 1000 is for correct unit
 
-                    ADC_loss_val = loss.item()#Store for logging
-                    criterion.update_data_range(torch.max(images))
-                    loss += criterion(M, images,  ssim_bool=True)
-
+                loss = criterion(M,images)
+                if 'estimated_sigma' in outdict and args.include_sigma_loss:
+                    sigma_loss = criterion(predicted_sigma, sigma)
                 else:
-                    criterion.update_data_range(torch.max(images))
-                    loss = criterion(M,images, ssim_bool = True)
+                    sigma_loss = 0
+                loss += sigma_loss
+
                 loss.backward()
+
 
                 #Maximum gradient before clipping. For logging
                 max_grad_before = max(p.grad.abs().max().item() for p in net.parameters() if p.grad is not None)
@@ -310,7 +274,7 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                     #Log by one GPU
                     experiment.log({
                         'train loss': loss.item(),
-                        'ADC_loss': ADC_loss_val,
+                        'sigma loss': sigma_loss.item() if not isinstance(sigma_loss, (int, float)) else sigma_loss,
                         'max gradient before clipping': max_grad_before,
                         'step': global_step,
                         'epoch': epoch
@@ -321,11 +285,44 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                 if rank == 0 or sweeping:
                     pbar.update(images.shape[0])
 
+            avg_loss = avg_loss/num_batches
+
+
+            if sweeping and epoch > 1 and avg_loss>last_avg_loss+10:
+                save_path = Path(
+                    os.path.join(dir_checkpoint, args.main_folder, training_model, fitting_model, f'run_{run_number}'))
+                Path(save_path).mkdir(parents=True, exist_ok=True)
+                if os.path.exists(str(save_path / 'checkpoint_best.pth')):
+                    net.load_state_dict(torch.load(str(save_path / 'checkpoint_best.pth'), weights_only=True))
+                    logging.info(f'Spike in loss detected ({last_avg_loss:.3f} to {avg_loss:.3f}), loading best checkpoint.')
+                else:
+                    logging.info(f'Spike in loss detected ({last_avg_loss:.3f} to {avg_loss:.3f}), but no best checkpoint found.')
+                continue
+            last_avg_loss = avg_loss
+
+
             with torch.no_grad():
-                val_loss, params, save_dict, M, img,sig = post_process.evaluate(val_loader, net, rank, b, input_sigma=input_sigma, ADC_loss= ADC_loss, use_3D=args.use_3D)
-            scheduler.step(torch.round(val_loss*10000)/10000)
-            # The mul. with 10000 and rounding is a workaround to have
-            # scheduler only look at 4 decimals
+                val_loss, params, save_dict, M, img,sig = post_process.evaluate(val_loader, net, rank, b, input_sigma=input_sigma,estimate_sigma=args.estimate_sigma, use_3D=args.use_3D, include_sigma_loss=args.include_sigma_loss)
+
+            if epoch == 1:
+                best_val_loss = val_loss
+
+            if (rank == 0 or sweeping) and val_loss<best_val_loss:
+
+                best_val_loss = val_loss
+                save_path = Path(os.path.join(dir_checkpoint, args.main_folder, training_model, fitting_model, f'run_{run_number}'))
+                Path(save_path).mkdir(parents=True, exist_ok=True)
+                if epoch <=200:
+                    torch.save(net.state_dict(), str(save_path / 'checkpoint_best200.pth'))
+                else:
+                    torch.save(net.state_dict(), str(save_path / 'checkpoint_best.pth'))
+                logging.info(f'Checkpoint {epoch} saved as best!')
+
+
+
+            scheduler.step(torch.round(val_loss*1000)/1000)
+            # The mul. with 100 and rounding is a workaround to have
+            # scheduler only look at 2 decimals
             if rank == 0 or sweeping:
 
                 logging.info('Validation Loss: {}'.format(val_loss))
@@ -337,28 +334,46 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
                             'min Image': img.cpu().min(),
                             'sigma_scale': net.sigma_scale.item() if os.getenv("WANDB_SWEEP_ID") else net.module.sigma_scale.item(),
                             'epoch': epoch,
-                            'avg_loss':avg_loss/num_batches
+                            'avg_loss':avg_loss
                             }
 
                 logging_dict.update(params)#log model parameters
                 save_dict.update({
-                    'sigma_true' if input_sigma else 'predicted_sigma':sig.cpu(),
                     'M': M.cpu(),
                     'image': img.cpu()
                 })
                 image_save_path = Path(os.path.join(experiment.dir,'images'))
                 image_save_path.mkdir(parents=True, exist_ok=True)
-                experiment.log(logging_dict)
                 for k,v in save_dict.items():#Locally save images
-                    plt.imsave(os.path.join(image_save_path,f"{k}_{global_step}.png"), v, cmap="gray")  # Use cmap="gray" for grayscale images
-            if val_loss < avg_loss/num_batches+2:# +2 leeway in considering as not overfitting
+
+                    if isinstance(v, np.ndarray):
+                        res = v
+                    else:
+                        res = v.cpu().numpy()
+
+
+                    res_min = np.min(res)
+
+                    res_max = np.max(res)
+
+                    logging_dict.update({f'{k}': wandb.Image(res / res_max),
+
+                                     f'{k}_min': res_min,
+
+                                     f'{k}_max': res_max,
+
+                                     })
+                experiment.log(logging_dict)
+
+
+            if val_loss < avg_loss+2:# +2 leeway in considering as not overfitting
                 if rank == 0 or sweeping:
-                    print(f'Not overfitting: val {val_loss:.4f} and avg_loss {avg_loss/num_batches:.4f}')
+                    print(f'Not overfitting {rank}: val {val_loss:.3f} and avg_loss {avg_loss:.3f}')
                 overfitting_counter = 0  # Reset counter if validation loss improves
-            elif epoch>=15:#Overfitting is considered only for epochs>15.
+            elif epoch>=15 and early_termination:#Overfitting is considered only for epochs>15.
                 overfitting_counter += 1
                 if rank == 0 or sweeping:
-                    print(f'Overfitted: val {val_loss:.4f} and avg_loss {avg_loss/num_batches:.4f} counter {overfitting_counter}')
+                    print(f'Overfitted: val {val_loss:.4f} and avg_loss {avg_loss:.4f} counter {overfitting_counter}')
                 if overfitting_counter >= overfitting_patience:
                     print("Early stopping triggered. Reporting run as finished to wandb.")
                     if rank == 0 or sweeping:
@@ -378,59 +393,76 @@ def train_net(dataset, net, b, input_sigma: bool,experiment, training_model: str
 
 
         # save the model for the current epoch
-        if (epoch>29 or optimizer.param_groups[0]['lr'] < 1e-6):#'lr' < 1e-6 is too low to learn effectively
-
+        if (epoch>epochs-1 or (optimizer.param_groups[0]['lr'] < 3e-5 and early_termination)):#'lr' is too low to learn effectively
+            if optimizer.param_groups[0]['lr'] < 3e-5 and early_termination:
+                print('Training stopped due to LR < 3e-5')
             if (rank == 0 or sweeping) and save_checkpoint:
-                save_path = Path(
-                    os.path.join(dir_checkpoint, args.main_folder, training_model, fitting_model, f'run_{run_number}'))
+                save_path = Path(os.path.join(dir_checkpoint, args.main_folder, training_model, fitting_model, f'run_{run_number}'))
                 Path(save_path).mkdir(parents=True, exist_ok=True)
                 torch.save(net.state_dict(), str(save_path / 'checkpoint_epoch{}.pth'.format(epoch)))
                 logging.info(f'Checkpoint {epoch} saved!')
                 wandb.finish(exit_code=0)
             break
-
+        if epoch == 200:
+            if (rank == 0 or sweeping) and save_checkpoint:
+                save_path = Path(os.path.join(dir_checkpoint, args.main_folder, training_model, fitting_model, f'run_{run_number}'))
+                Path(save_path).mkdir(parents=True, exist_ok=True)
+                torch.save(net.state_dict(), str(save_path / 'checkpoint_epoch{}.pth'.format(epoch)))
+                logging.info(f'Checkpoint {epoch} saved!')
 
     if rank ==0 or sweeping:
         experiment.finish()
 
+
     if not sweeping:
         dist.destroy_process_group()
+
 
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=30, help='Number of epochs')
     parser.add_argument('--batch_size', '-b', dest='batch_size', metavar='B', type=int, default=12, help='Batch size')
-    parser.add_argument('--learning_rate', '-l', metavar='LR', type=float, default=8e-2,
+    parser.add_argument('--learning_rate', '-l', metavar='LR', type=float, default=8e-4,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
-    parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
+    parser.add_argument('--validation', '-v', dest='val', type=float, default=20.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--patientData', '-dir', type=str, default='/m2_data/mustafa/patientDataReduced/', help='Enther the directory saving the patient data')
+    parser.add_argument('--patientData', '-dir', type=str, default=f'{dataset_path1},{dataset_path2}', help='Enter the directory saving the patient data')
     parser.add_argument('--custom_patient_list', '-clist', type=str, help='Input path to txt file with patient names to be used.')#default='new_patientList.txt'
     parser.add_argument('--input_sigma', '-s',  type=str, help='Use argument if sigma map is used as input.')
     parser.add_argument('--training_model', '-trn', default='attention_unet',help='Specify which training model to use. Choose between ...,...,...')
     parser.add_argument('--fitting_model', '-fit', default='biexp', help='Specify which fitting model to use')
-    parser.add_argument('--run_number', '-rnum', default='1', help='This argument is used by sweep_train.py')
+    parser.add_argument('--Kfolds', '-kf', default='1', help='Used for K-Fold cross validation, pass a number')
+    parser.add_argument('--run_number', '-rn', default='1', help='Pass a run number, ignored if k-fold is used')
     parser.add_argument('--main_folder', '-folder', default='cross_validation_l1', help='Specify main folder name')
-    parser.add_argument('--adc_as_loss', '-adc', type=str, help='Pass True if use ADC as loss function')
     parser.add_argument('--use_3D', '-3d', type= str, help='Pass True if using 3D diffusion')
     parser.add_argument('--learn_sigma_scaling', '-ss', type= str, help='Pass True if allowing for AI to learn scaling sigma')
-    parser.add_argument('--estimate_S0', '-s0', type= str, help='Pass True if allowing for AI to estimate S0-image')
+    parser.add_argument('--estimate_S0', '-ests0', type= str, help='Pass True if allowing for AI to estimate S0-image')
+    parser.add_argument('--estimate_sigma', '-estsigma', type= str, help='Pass True if allowing for AI to estimate noise map')
     parser.add_argument('--feed_sigma', '-fs', type= str, help='Pass True if feeding sigma map to AI. Input sigma has to be true')
-
+    parser.add_argument('--include_sigma_loss', '-sigma_loss', type=str,help='Pass True if using noise map inside a loss function')
+    parser.add_argument('--use_true_sigma', '-use_true_sigma', type=str,help='Pass True if using noise map from OBSIDIAN in rice calculation')
+    parser.add_argument('--run_index', '-run_index', type=str,help='Used by sweep_train.py')
+    parser.add_argument('--kfold_seed', '-kfold_seed', type=str,help='Used by sweep_train.py')
 
     return parser.parse_args()
+def get_model_size(model):
+    num_params = sum(p.numel() for p in model.parameters())
+    total_bytes = num_params * 4  # assuming float32 (4 bytes)
+    size_MB = total_bytes / (1024 ** 2)
+    size_GB = total_bytes / (1024 ** 3)
+    print(f"Model has {num_params:,} parameters")
+    print(f"Size: {size_MB:.2f} MB ({size_GB:.4f} GB)")
 
-
-def main(rank,world_size ,sweep):
+def main(rank,world_size ,sweep, kfold_seed,run_index):
 
     if not sweep:
         #Setup parallel training on multiple GPUs
         setup(rank,world_size)
-        torch.manual_seed(42)
-        torch.cuda.manual_seed_all(42)
+        torch.manual_seed(43)
+        torch.cuda.manual_seed_all(43)
     args = get_args()
     data_dir = args.patientData
     if args.training_model == 'unetr': model_unetr= True#Required special dimensions for input data (208,240) or (240,240)
@@ -446,10 +478,32 @@ def main(rank,world_size ,sweep):
     else:
         #Dataset containing all patients in data_dir
         patientData = patientDataset(data_dir=data_dir,input_sigma=args.input_sigma, transform=False, crop = True,model_unetr =  model_unetr, use_3D=args.use_3D, fitting_model = args.fitting_model)
-
     if rank ==0:
         #Log by one GPU (with ID = 0) only
         logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+        print(f'Loaded {len(patientData.file_paths)} patients:\n')
+        for file in patientData.file_paths: print(file)
+
+
+    val_percent = args.val / 100
+
+    # split into training and validation set
+    n_val = int(len(patientData) * val_percent)
+    n_train = len(patientData) - n_val
+
+    n_kfolds = int(args.Kfolds)
+    if n_kfolds > 1:
+        kfold = KFold(n_splits=n_kfolds,random_state=kfold_seed, shuffle=True)
+        _, (train_ids, val_ids) = list(enumerate(kfold.split(patientData)))[run_index]
+        train_set = Subset(patientData, train_ids)
+        val_set = Subset(patientData, val_ids)
+        run_number = run_index+1
+        print(f'{val_ids}\n{train_ids}')
+    else:
+        train_set, val_set = random_split(patientData, [n_train, n_val])
+        run_number = int(args.run_number) if args.run_number else 1
+
+
 
     b = torch.linspace(0, 2000, steps=21).cuda(non_blocking=True)
     b = b[1:]
@@ -459,17 +513,15 @@ def main(rank,world_size ,sweep):
 
     if args.training_model == 'attention_unet':
         n_mess = "atten_unet"
-        net = Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, feed_sigma=args.feed_sigma).cuda()
+        net = Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, estimate_sigma=args.estimate_sigma,use_true_sigma=args.use_true_sigma, feed_sigma=args.feed_sigma).cuda()
     elif args.training_model == 'unet':
         n_mess = "unet"
-        net = UNet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, feed_sigma=args.feed_sigma).cuda()
+        net = UNet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, estimate_sigma=args.estimate_sigma,use_true_sigma=args.use_true_sigma, feed_sigma=args.feed_sigma).cuda()
     elif args.training_model == 'res_atten_unet':
         n_mess = "res_atten_unet"
-        net = Res_Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, feed_sigma=args.feed_sigma).cuda()
-    elif args.training_model == 'unet_2decoder':
-        n_mess = "unet_2decoder"
-        net = UNet_2Decoders(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0).cuda()
+        net = Res_Atten_Unet(n_channels=n_channels, rice=True, input_sigma=args.input_sigma, fitting_model=args.fitting_model, use_3D=args.use_3D, learn_sigma_scaling=args.learn_sigma_scaling, estimate_S0 = args.estimate_S0, estimate_sigma=args.estimate_sigma,use_true_sigma=args.use_true_sigma, feed_sigma=args.feed_sigma).cuda()
 
+    print(get_model_size(net))
     if rank == 0:
         print("Using ", torch.cuda.device_count(), " GPUs!\n")
         logging.info(f'Network:\n'
@@ -499,9 +551,9 @@ def main(rank,world_size ,sweep):
 
     if os.getenv("WANDB_SWEEP_ID"):#Variable exists if sweep is used
         print('Running sweep')
-        experiment = wandb.init(mode = 'online')
+        experiment = wandb.init(reinit=True)
         config = wandb.config# Automatically pulls sweep parameters from configurations of the sweep
-        wandb.run.name = str(f'Batch_size {config.batch_size} num_epochs {config.epochs} lr {config.learning_rate:.4f}')
+        wandb.run.name = str(f'{config.training_model}_{config.fitting_model}_{run_number}')
 
         epochs = config['epochs']
         batch_size =  config['batch_size']
@@ -518,47 +570,32 @@ def main(rank,world_size ,sweep):
         experiment = None
 
         if rank==0:
-            experiment = wandb.init(project='UNet-Denoise', resume='allow', anonymous='must', mode = 'online')
+            experiment = wandb.init(project='UNet-Denoise', resume='allow')
             experiment.config.update(dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
                                       val_percent=args.val / 100))
 
 
     try:
-        if sweep:
-            train_net(dataset=patientData,
-                      net=net,
-                      world_size=world_size,
-                      b = b,
-                      epochs=epochs,
-                      batch_size=batch_size,
-                      learning_rate=learning_rate,
-                      val_percent=args.val / 100,
-                      input_sigma=args.input_sigma,
-                      experiment = experiment,
-                      save_checkpoint=True,
-                      sweeping=True,
-                      device=device,
-                      training_model = args.training_model,
-                      fitting_model = args.fitting_model,
-                      run_number= args.run_number
-                      )
-        else:
-            train_net(dataset=patientData,
-                      net=net,
-                      rank=rank,
-                      world_size=world_size,
-                      b=b,
-                      epochs=epochs,
-                      batch_size=batch_size,
-                      learning_rate=learning_rate,
-                      val_percent=args.val / 100,
-                      input_sigma=args.input_sigma,
-                      experiment=experiment,
-                      save_checkpoint=True,
-                      training_model = args.training_model,
-                      fitting_model = args.fitting_model,
-                      run_number = args.run_number
-            )
+
+        train_net(train_set=train_set,
+                  val_set=val_set,
+                  run_number  =run_number,
+                  net=net,
+                  rank = rank if not sweep else None,
+                  world_size=world_size,
+                  b = b,
+                  epochs=epochs,
+                  batch_size=batch_size,
+                  learning_rate=learning_rate,
+                  input_sigma=args.input_sigma,
+                  experiment = experiment,
+                  save_checkpoint=True,
+                  sweeping=sweep,#####
+                  device=device if sweep else None,#####
+                  training_model = args.training_model,
+                  fitting_model = args.fitting_model
+                  )
+
     except KeyboardInterrupt:
         torch.save(net.state_dict(), 'INTERRUPTED.pth')
         logging.info('Saved interrupt')
@@ -566,16 +603,39 @@ def main(rank,world_size ,sweep):
 
 if __name__ == "__main__":
 
-    if os.getenv("WANDB_SWEEP_ID"):
-
-        try:
-            main(rank = 0, world_size= None, sweep = True)
-        except KeyboardInterrupt:
-
-            logging.info('Exited')
-            raise
-
+    args = get_args()
+    n_kfolds = int(args.Kfolds)
+    if args.kfold_seed:
+        kfold_seed = int(args.kfold_seed)
     else:
-        sweep = False
-        world_size = torch.cuda.device_count()  # Number of GPUs
-        mp.spawn(main, args=(world_size,sweep), nprocs=world_size)
+        kfold_seed = random.randint(0, 2 ** 16 - 1)
+
+    if n_kfolds>1:print(f'K-fold seed is {kfold_seed}' )
+    if not args.run_index:
+        print('No run index')
+        for run_index in range(n_kfolds):
+            if n_kfolds>1: print(f'Running: Fold {run_index+1}')
+
+            if os.getenv("WANDB_SWEEP_ID"):
+
+                try:
+                    main(rank = 0, world_size= None, sweep = True,kfold_seed=kfold_seed,run_index=run_index)
+                except KeyboardInterrupt:
+
+                    logging.info('Exited')
+                    raise
+
+            else:
+                sweep = False
+                world_size = torch.cuda.device_count()  # Number of GPUs
+                mp.spawn(main, args=(world_size,sweep,kfold_seed,run_index), nprocs=world_size)
+    else:
+        print(f'We have run index {int(args.run_index)}')
+        if os.getenv("WANDB_SWEEP_ID"):
+
+            try:
+                main(rank=0, world_size=None, sweep=True, kfold_seed=kfold_seed, run_index=int(args.run_index))
+            except KeyboardInterrupt:
+
+                logging.info('Exited')
+                raise

@@ -1,0 +1,11 @@
+node_modules
+dataview_devel
+__pycache__
+test
+wandb
+.idea
+.git
+model/__pycache__
+.gitignore
+custom_patientList.txt
+Analyse_result_compl.py

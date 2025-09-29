@@ -1,5 +1,4 @@
 from cmath import sqrt
-
 import wandb
 from torch.utils.data import Dataset
 import torch
@@ -10,13 +9,12 @@ import torch.nn as nn
 import torchvision
 from torchvision import transforms
 from IPython import embed
-from pytorch_msssim import MS_SSIM
-
+from itertools import product
 
 class CustomLoss(nn.Module):
 
     """
-    Custom loss function: :math:`L` = (1-SSIM) :math:`\cdot` MSEloss
+    Custom loss function: :math:`L` = L1-loss
 
     Example:
 
@@ -28,34 +26,17 @@ class CustomLoss(nn.Module):
     def __init__(self):
         super(CustomLoss, self).__init__()
         # For one dimensional channel, for example when inputting ADC map in loss function.
-        self.ssim_loss = MS_SSIM(channel=1, win_size=5)
-        self.ssim_loss2 = MS_SSIM(channel=20, win_size=5)#Default number of channels
-        self.ssim_loss3 = MS_SSIM(channel=60, win_size=5)#If we use 3D in training
-        self.mse_loss =  nn.L1Loss()#nn.MSELoss()
-    def update_data_range(self, range):
-        self.ssim_loss.data_range = range
-    def forward(self, M,images, ssim_bool = False, only_ssim = False):
+        self.mse_loss =  nn.L1Loss()
+
+    def forward(self, M,images):
         """
       :param M: The predicted data/image
       :param images: The target data/image
-      :param ssim_bool: If True, ssim is part of the loss function. Else only L1 is calculated
-      :param only_ssim: If True, the loss function will only be = 1-ssim. L1 would not be included.
       """
 
-        if M.shape[1]>1 and M.shape[1]<21 and ssim_bool:
-            loss_ssim = 1 - self.ssim_loss2(M, images)
-        elif M.shape[1]>21 and ssim_bool:
-            loss_ssim = 1 - self.ssim_loss3(M, images)
-        elif ssim_bool:
-            loss_ssim = 1 - self.ssim_loss(M, images)
-        else:
-            loss_ssim = 1
+        loss_mse = self.mse_loss(M,images)
 
-        if not only_ssim:
-            loss_mse = self.mse_loss(M,images)
-        else:
-            loss_mse = 1
-        return loss_ssim * loss_mse
+        return  loss_mse
 
 class post_processing():
     """
@@ -64,7 +45,7 @@ class post_processing():
     def __init__(self):
         super().__init__()
 
-    def evaluate(self, val_loader, net, rank, b, input_sigma: bool, ADC_loss,use_3D):
+    def evaluate(self, val_loader, net, rank, b, input_sigma: bool, estimate_sigma,use_3D,include_sigma_loss):
         """
         Here, validation data is used to monitor the training
 
@@ -73,7 +54,6 @@ class post_processing():
         :param: rank: Device-ID
         :param: b: Tensor of diffusion levels
         :param: input_sigma:Boolean, if a known noise map is input to the neural network.
-        :param: ADC_loss: Boolean, if loss based on ADC maps is implemented.
         :param: use_3D: Boolean, if 3D is implemented.
 
         """
@@ -96,46 +76,15 @@ class post_processing():
 
             M = M * scale_factor.view(-1, 1, 1, 1)
             images = images * scale_factor.view(-1, 1, 1, 1)
+            if 'estimated_sigma' in param_dict:
+                predicted_sigma = param_dict['estimated_sigma']
 
-            if ADC_loss:
-                if use_3D:
-                    slicing = [[slice(0, 1), slice(9, 10)],#To calculate ADC between b100 and b1000
-                               [slice(20, 21), slice(29, 30)],
-                               [slice(40, 41), slice(49, 50)]]
-                else:
-                    slicing = [[slice(0, 1), slice(9, 10)]]# Array[slice(0,1)] same as [Array[0]]
-                ADC_avg_M = torch.zeros(size=(len(slicing), M.shape[0], 1, *M.shape[-2:]), device=rank)# len(slicing)=3 if 3D else = 1
-                ADC_avg_images = torch.zeros(size=(len(slicing), images.shape[0], 1, *images.shape[-2:]), device=rank)
-
-                for diff_index, sl in enumerate(slicing):
-                    im100 = images[:, sl[0]]
-                    im1000 = images[:, sl[1]]
-                    im100 = im100 + torch.tensor(0.0001, device=im100.device)
-                    im1000 = im1000 + torch.tensor(0.0001, device=im100.device)
-                    ADC_avg_images[diff_index] = -torch.log(im1000 / im100) / (1000 - 100)
-
-                    M100 = M[:, sl[0]]
-                    M1000 = M[:, sl[1]]
-                    M100 = M100 + torch.tensor(0.0001, device=im100.device)
-                    M1000 = M1000 + torch.tensor(0.0001, device=im100.device)
-                    ADC_avg_M[diff_index] = -torch.log(M1000 / M100) / (2000 - 100)
-                ADC_avg_images = torch.mean(ADC_avg_images, dim=0)
-                ADC_avg_M = torch.mean(ADC_avg_M, dim=0)
-            ADC_loss_val = 1
-
-            if ADC_loss:
-                criterion.update_data_range(torch.max(ADC_avg_images))
-                loss = 9 * 1000 * criterion(ADC_avg_M, ADC_avg_images, ssim_bool=False)
-                # The 9 is arbitrary, depending on how much importance is given to the ADC loss relative to criterion(M,images)
-                # The 1000 is for correct unit
-
-                ADC_loss_val = loss.item()
-                criterion.update_data_range(torch.max(images))
-                loss += criterion(M, images, ssim_bool=True)
-
+            loss = criterion(M, images)
+            if 'estimated_sigma' in param_dict and include_sigma_loss and input_sigma:
+                sigma_loss = criterion(predicted_sigma, sigma * scale_factor.view(-1, 1, 1, 1))
             else:
-                criterion.update_data_range(torch.max(images))
-                loss = criterion(M, images, ssim_bool=True)
+                sigma_loss = 0
+            loss += sigma_loss
 
 
 
@@ -146,23 +95,37 @@ class post_processing():
                 first_indices = [param_dict['names'].index(val) for val in dict.fromkeys(param_dict['names'])]
                 #returns parameter names, e.g. ['d1','d2','f']
 
-                for inde in first_indices:
-                    res = param_dict['parameters'][inde][0]#Parameter array
-                    key = param_dict['names'][inde]#Parameter name
+                for index in first_indices:
+                    res = param_dict['parameters'][index][0]#Parameter array
+                    key = param_dict['names'][index]#Parameter name
                     res = res.cpu().detach().numpy()
                     res_min = np.min(res)
                     res_max = np.max(res)
                     log_dict.update({#For logging
-                                     f'{key}_min': res_min,
-                                     f'{key}_max': res_max,
+                                     f'{key}_minev': res_min,
+                                     f'{key}_maxev': res_max,
                                      })
                     save_dict.update({f'{key}': res / res_max})#For saving the array as image
 
-                if input_sigma:#If a known noise map is input
+                if 'estimated_sigma' in param_dict:
+                    estimated_sigma = param_dict['estimated_sigma'].cpu().detach().numpy()[0]
+                    log_dict.update({  # For logging
+                        f'EstimatedSigma_minev': estimated_sigma.min(),
+                        f'EstimatedSigma_maxev': estimated_sigma.max(),
+                    })
+                    save_dict.update({f'EstimatedSigma': estimated_sigma / estimated_sigma.max()})
+                if input_sigma:
+                    input_sigma_image = sigma[0,0,:,:].cpu().detach().numpy()
+                    log_dict.update({  # For logging
+                        f'TrueSigma_minev': input_sigma_image.min() ,
+                        f'TrueSigma_maxev':  input_sigma_image.max(),
+                    })
+                    save_dict.update({f'TrueSigma': input_sigma_image /  input_sigma_image.max()})
+                if input_sigma and not estimate_sigma :#If a known noise map is input
                     final_sigma = sigma[0,0,:,:]#The known noise map
                 else:
                     final_sigma  =param_dict['sigma'][0,0,:,:]#Noise map from neural network
-
+                final_sigma = final_sigma/final_sigma.max()
 
             val_losses += loss_value
                                                                 #For saving the predicted and target image
@@ -173,67 +136,100 @@ class patientDataset(Dataset):
     wrap the patient numpy data to be dealt by the dataloader
     '''
 
-    def __init__(self, data_dir, input_sigma: bool,use_3D:bool,fitting_model: str, transform=None, normalize = True, custom_list = None, crop=True, model_unetr = False):
+    def __init__(self, data_dir, input_sigma: bool,use_3D:bool,fitting_model: str, transform=None, normalize = True, custom_list = None, crop=True,min_image_shape = None, model_unetr = False):
         super(Dataset).__init__()
+        self.min_image_shape = min_image_shape
         self.data_dir = data_dir #Path to the diffusion data from patients
         self.transform = transform #Optional transformations to data
         self.use_3D = use_3D #Boolean, if 3D is implemented
-        self.num_slices = 22
         self.num_direction = 3
         self.input_sigma = input_sigma #Boolean, if a known noise mpa is input to the neural network model
         self.crop = crop #If images are to be cropped before loaded during training
-        #self.model_unetr = model_unetr
         self.fitting_model= fitting_model #Name of fitting model applied.
 
         # Must not include ToTensor()
         if custom_list is not None:#If we have a custom list of patients, then only those patients are included in dataset
             self.patients = custom_list
         else:
-            self.patients = os.listdir(data_dir)#Else all patients in that folder are included
-        self.data = self.load_npy_files_from_dir(data_directory= self.data_dir, patient_list=  self.patients)#Load all data. It gets saved to RAM
-        print(len(self.data))
+            self.patients = None#Else all patients in that folder are included
+        self.data,self.file_paths = self.load_npy_files_from_dir(data_directory= self.data_dir, patient_list=  self.patients)#Load all data. It gets saved to RAM
+        self.n_slice_list = []
+        self.indexList = self.indexify(data = self.data)
+        self.slice_dict = {os.path.basename(path):self.n_slice_list[i]  for i,path in enumerate(self.file_paths)}
         self.normalize = normalize #Boolean, if we want to normalize data
-        self.names = self.pat_names()
+        self.names = self.pat_names(patient_list=  self.patients)
 
-    def pat_names(self):
+    def indexify(self,data):
+
+        tuples  = []
+        for patient_index,patient in enumerate(data):
+            num_slices = data[patient_index][0].shape[0]
+            self.n_slice_list.append(num_slices)
+            temp =[(patient_index, b, c) for b, c in product(range(num_slices), range(3))]
+            tuples += sorted(temp, key=lambda x: (x[2], x[0], x[1]))
+        return tuples
+
+    def pat_names(self,patient_list):
         """
         Save the patients' name in a list. e.g. ['pat1', 'pat2', ..., ...]
         """
-        return [pat_d[:-4] for pat_d in os.listdir(self.data_dir)]
+        data_directory = self.data_dir.split(",")
+        if isinstance(data_directory,list):
+            names = []
+            for directory in data_directory:
+                names +=  [ f.split('.')[0].split('_')[0] for f in os.listdir(directory) if f.endswith('.npy') and (patient_list is None or f in patient_list )]
+        else:
+            assert False, 'Something went wrong with dataset path'
+
+        return names
 
 
     def load_npy_files_from_dir(self, data_directory, patient_list):
-        files = [f for f in os.listdir(data_directory) if f.endswith('.npy') and f in patient_list]  # List all .npy files
-        data = []
+        data_directory = data_directory.split(",")
 
+        if isinstance(data_directory,list):
+            files = []
+            for directory in data_directory:
+                files +=  [os.path.join(directory,f) for f in os.listdir(directory) if f.endswith('.npy') and (patient_list is None or f in patient_list )]
+        else:
+            assert False, 'Something went wrong with dataset path'
+
+        data = []
+        min_image_shape = [512,512]
         for file in files:
-            file_path = os.path.join(data_directory, file)
-            np_array = np.load(file_path, allow_pickle=True)[()]  # Load the .npy file
-            im = np_array['image']['3Dsig']#The diffusion images
+            np_array = np.load(file, allow_pickle=True)[()]  # Load the .npy file
+
+            im = np_array['images']#The diffusion images
             b0 = np_array['image_b0']#b0-image
             result_biexp = np_array['result_biexp']#array with parameters from OBSIDIAN, e.g ['d1','d2','f','S0','sigma','nstep']
             result_kurtosis = np_array['result_kurtosis']
             result_gamma = np_array['result_gamma']
-            data.append([im,b0,result_biexp,result_kurtosis,result_gamma])
+            data.append([im, b0, result_biexp, result_kurtosis, result_gamma])
 
-        return data
+
+
+            image_shape = im.shape[-2:]
+            if image_shape[0]<min_image_shape[0]: min_image_shape[0] = image_shape[0]
+            if image_shape[1]<min_image_shape[1]: min_image_shape[1] = image_shape[1]
+
+        if self.min_image_shape is None: self.min_image_shape = min_image_shape
+        return data,files
     def __len__(self):
         """each data file consist of 22 slices, each slice acquired in three diffusion directions and in each direction diffusion weighted images at 20 b-values\n
             When using 3D, the total number of data samples decreases by 3-fold.
 
         """
-        return len(self.patients)*self.num_slices*self.num_direction if not self.use_3D else len(self.patients)*self.num_slices
-    
+        return len(self.indexList) if not self.use_3D else len(self.indexList)//self.num_direction
+
     def __getitem__(self, idx):
         # each time read on sample
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        direction_indice = idx//(self.num_slices*len(self.patients))
-        pats_indice = idx // (self.num_slices*self.num_direction) if not self.use_3D else idx // (self.num_slices)
-        slice_indice = idx % self.num_slices
+        pats_indice, slice_indice,direction_indice = self.indexList[idx]
+
 
         imgs,b0_data, sigma, factor = self.image_data(self.data[pats_indice], slice_indice, direction_indice,self.input_sigma, normalize=self.normalize, crop=self.crop)
-        
+
         if self.transform:
             imgs = self.transform(imgs)
 
@@ -253,10 +249,8 @@ class patientDataset(Dataset):
 
         idx = slice_idx
 
-        # image_data - (num_slices,num_diffsuion_direction , H, W)
         image_data = data[0][idx, :, :, :]
 
-        # image_b0 - (num_slices, H, W)
         image_b0 = data[1][idx, :, :]
 
         image_data = image_data.astype('float32')
@@ -275,6 +269,7 @@ class patientDataset(Dataset):
 
 
         if input_sigma:
+
             sigma = data[fit_index][idx, :, :, -2]#Take noise map from OBSIDIAN
             sigma = sigma.astype('float32')
             sigma = torch.from_numpy(sigma)
@@ -310,7 +305,9 @@ class patientDataset(Dataset):
             image_data = self.crop_image(image_data)
             if input_sigma:
                 sigma = self.crop_image(sigma)
+
             image_b0 = self.crop_image(image_b0)
+
 
         return image_data, image_b0, sigma, factor
 
@@ -319,8 +316,11 @@ class patientDataset(Dataset):
         (20, H, W)
         """
         #if self.model_unetr: return images[:, 16:-16, :]
-        return images[:, 20:-20, :]
-
+        target_h,target_w = self.min_image_shape
+        _,h,w  = images.shape
+        start_y = (h - target_h) // 2
+        start_x = (w - target_w) // 2
+        return images[:,20:-20]
 
 def init_weights(model):
     for name, module in model.named_modules():

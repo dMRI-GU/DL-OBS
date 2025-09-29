@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+KERNEL_SIZE = 3
 
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
@@ -13,11 +14,11 @@ class DoubleConv(nn.Module):
         if not mid_channels:
             mid_channels = out_channels
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            nn.Conv2d(in_channels, mid_channels, kernel_size=KERNEL_SIZE, padding=1, bias=False),
             nn.BatchNorm2d(mid_channels),
             nn.ReLU(inplace=True),
-            #nn.Dropout(dropout_prob),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.Dropout(dropout_prob),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=KERNEL_SIZE, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
@@ -33,11 +34,11 @@ class DoubleConvResidual(nn.Module):
         if not mid_channels:
             mid_channels = out_channels
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            nn.Conv2d(in_channels, mid_channels, kernel_size=KERNEL_SIZE, padding=1, bias=False),
             nn.BatchNorm2d(mid_channels),
             nn.ReLU(inplace=True),
-            #nn.Dropout(dropout_prob),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1),
+            nn.Dropout(dropout_prob),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=KERNEL_SIZE, padding=1),
             nn.BatchNorm2d(out_channels),
 
         )
@@ -100,7 +101,7 @@ class Up(nn.Module):
 
         x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
                         diffY // 2, diffY - diffY // 2])
-        
+
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
@@ -109,7 +110,7 @@ class Up_conv(nn.Module):
         super(Up_conv, self).__init__()
         self.up = nn.Sequential(
                 nn.Upsample(scale_factor=2),
-                nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True),
+                nn.Conv2d(in_channels, out_channels, kernel_size=KERNEL_SIZE, stride=1, padding=1, bias=True),
                 nn.BatchNorm2d(out_channels),
                 nn.ReLU(inplace=True))
     
@@ -227,8 +228,8 @@ class Attention_block(nn.Module):
     
     def forward(self, g, x):
         g1 = self.W_g(g)
-        x1 = self.W_x(x)
-        
+        x1 = self.W_x(x)#gate
+
         diffY = x1.size()[2] - g1.size()[2]
         diffX = x1.size()[3] - g1.size()[3]
 

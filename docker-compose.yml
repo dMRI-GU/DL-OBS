@@ -1,0 +1,78 @@
+version: "3.8"
+services:
+  wandb:
+    image: wandb/local
+    container_name: TRUEADC-AI-wandb-local
+    ports:
+      - "8081:8080"
+    networks:
+      - TRUEADC-AI-network
+
+  main:
+    build:
+      context: .
+    container_name: TRUEADC-AI-main
+    depends_on:
+      - wandb
+    environment:
+      - WANDB_BASE_URL=http://wandb:8080
+    command: >
+      bash -c "echo 'Access W&B at http://localhost:8081' && bash"
+    stdin_open: true
+    tty: true
+    volumes:
+      - /TANK/mustafa/checkpoints:/host-checkpoint
+      - /TANK/mustafa/G2-patients/trainingData/WithOBSIDIANsigma:/host-trainset1
+      - /m2_data/mustafa/patientDataReduced:/host-trainset2
+      - /m2_data/mustafa/nonTrainData:/host-testset1      
+      - /TANK/mustafa/G2-patients/testData/WithOBSIDIANsigma:/host-testset2
+      - /m2_data/mustafa/denoise-unet:/developer
+    networks:
+      - TRUEADC-AI-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    shm_size: '4gb' #Shared memory
+networks:
+  TRUEADC-AI-network:
+    name: TRUEADC-AI-network
+
+
+
+#if no docker compose:
+#docker network create denoiseMRInetwork
+#docker build -t mri_denoise_image /m2_data/mustafa/denoise-unet
+#docker run -d --name wandb --network denoiseMRInetwork -p 8080:8080 wandb/local
+#export USER_DATA_PATH=/m2_data/mustafa/patientDataReduced
+#docker run -it --rm \
+#  --name MRIdenoise-main \
+#  --network denoiseMRInetwork \
+#  -e WANDB_BASE_URL=http://wandb:8080 \
+#  -v ${USER_DATA_PATH}:/data \
+#  mri_denoise_image \
+#  bash -c "echo 'Access W&B at http://localhost:8080' && bash"
+#docker run -it --rm   --name MRIdenoise-main --gpus all   --network denoiseMRInetwork   -e WANDB_BASE_URL=http://wandb:8080   -v ${MRI_TRAIN_PATH}:/train_data -v /m2_data/mustafa/denoise-unet/train.py:/app/train.py -v ${MRI_TEST_PATH}:/test_data -v /m2_data/mustafa/denoise-unet/train.py:/app/train.py mri_denoise_image   bash -c "echo '🚀 Access W&B at http://localhost:8080' && bash"
+#wandb login
+#CTRL+C you API key and # CTRL+V
+#ipython
+# run train.py --batch_size 30 --epochs 10 --learning_rate 0.0008  --training_model res_atten_unet  --fitting_model biexp --main_folder 'TESTING' -s0 't' -s 't' -dir '/data'
+
+
+
+
+
+
+
+
+
+#USER_DATA_PATH=/their/custom/path docker-compose up or export USER_DATA_PATH=/their/custom/path
+#docker compose up -d #be in same directory as yaml file
+#Then enter the container interactively:
+#docker exec -it MRIdenoise-main bash
+#Also login to wandb by running in container CLI:
+#wandb login
+#Create an account and paste you API key to the CLI.
+
+
