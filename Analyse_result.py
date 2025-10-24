@@ -1936,11 +1936,11 @@ def ADCTable(model_name,model,fitting_name,MAIN_METHOD,first_time = False, print
 
             if not '3D' in MAIN_METHOD:
                 M_file = np.concatenate((M_file[0:n_slices], M_file[n_slices:n_slices*2], M_file[n_slices*2:n_slices*3]), axis=1)#[:, 0:20, :, :]##may need to change if you want specific dir##
-                ADCK_predicted = np.mean(par_file[[0,2,4]],axis=0)
-                K_predicted = np.mean(par_file[[1,3,5]],axis=0)
-            else:
                 ADCK_predicted = par_file[0]
                 K_predicted = par_file[1]
+            else:
+                ADCK_predicted = np.mean(par_file[[0, 2, 4]], axis=0)
+                K_predicted = np.mean(par_file[[1, 3, 5]], axis=0)
             print(f'ADCK_predicted shape {ADCK_predicted.shape}')
             ADC_predicted_array = np.empty(shape=(num_diff,*shape))
             for i in range(num_diff):
